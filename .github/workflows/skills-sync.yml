@@ -1,0 +1,61 @@
+name: skills-sync
+
+on:
+  push:
+    paths:
+      - "skills-sync/**"
+      - "skills/**"
+      - "skills.lock"
+      - ".github/workflows/skills-sync.yml"
+  pull_request:
+    paths:
+      - "skills-sync/**"
+      - "skills/**"
+      - "skills.lock"
+      - ".github/workflows/skills-sync.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: skills-sync
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Test with coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 85 --ignore-filename-regex '(main\.rs|tui\.rs|/bin/)'
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: skills-sync/lcov.info
+
+  release-tags:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build skills-release
+        run: cargo build --release -p skills-sync --bin skills-release
+        working-directory: skills-sync
+      - name: Tag version bumps
+        run: |
+          PARENT="${{ github.event.before }}"
+          if [ -z "$PARENT" ] || [ "$PARENT" = "0000000000000000000000000000000000000000" ]; then
+            echo "No parent revision; skip"
+            exit 0
+          fi
+          ./skills-sync/target/release/skills-release --repo . --parent "$PARENT" --head HEAD --create
+          git push --tags || true

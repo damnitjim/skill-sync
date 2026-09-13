@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# jira-grooming — surface backlog items that need refinement:
+# unestimated, unassigned, or stale (untouched > N days).
+#
+#   jira-grooming [--project DE] [--stale-days 30] [--json]
+#
+# Auth: JIRA_API_TOKEN (required).
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+PROJECT="DE"
+STALE_DAYS=30
+JSON_OUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project)    PROJECT="$2"; shift 2 ;;
+    --stale-days) STALE_DAYS="$2"; shift 2 ;;
+    --json)       JSON_OUT=true; shift ;;
+    *)            echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+JQL="project = $PROJECT AND statusCategory != Done AND (customfield_10016 IS EMPTY OR assignee IS EMPTY OR updated < -${STALE_DAYS}d) ORDER BY updated ASC"
+FIELDS="summary,status,issuetype,assignee,customfield_10016,updated"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$JQL" \
+  --data-urlencode "fields=$FIELDS" \
+  --data-urlencode "maxResults=200")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+result=$(echo "$body" | jq '{
+  project: "'"$PROJECT"'",
+  stale_days: '"$STALE_DAYS"',
+  total: (.issues | length),
+  issues: [.issues[] | {
+    key: .key,
+    summary: .fields.summary,
+    status: .fields.status.name,
+    type: .fields.issuetype.name,
+    assignee: (.fields.assignee.displayName // "Unassigned"),
+    points: .fields.customfield_10016,
+    updated: .fields.updated,
+    reasons: ([
+      (if .fields.customfield_10016 == null then "unestimated" else empty end),
+      (if .fields.assignee == null then "unassigned" else empty end)
+    ])
+  }]
+}')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$result"
+  exit 0
+fi
+
+count=$(echo "$result" | jq '.total')
+if [[ "$count" -eq 0 ]]; then
+  echo "No grooming candidates in $PROJECT."
+  exit 0
+fi
+
+printf "%-10s %-14s %-18s %-6s %s\n" "KEY" "STATUS" "ASSIGNEE" "SP" "SUMMARY"
+printf "%-10s %-14s %-18s %-6s %s\n" "---" "------" "--------" "--" "-------"
+echo "$result" | jq -r '.issues[] | [.key, .status, .assignee, (.points // "--" | tostring), .summary] | @tsv' \
+  | while IFS=$'\t' read -r key status assignee sp summary; do
+      printf "%-10s %-14s %-18s %-6s %s\n" "$key" "$status" "$assignee" "$sp" "$summary"
+    done

@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: jira-transition <STATUS> <ISSUE-KEY> [--resolution <name>] [--approver <email>]" >&2
+  echo "Example: jira-transition \"In Progress\" DE-123" >&2
+  echo "Example: jira-transition \"Resolve\" DE-123 --resolution Duplicate" >&2
+  echo "Example: jira-transition \"Resolve\" DE-123 --resolution Duplicate --approver user@sophos.com" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+TARGET_STATUS="$1"
+ISSUE_KEY="$2"
+shift 2
+
+RESOLUTION_NAME=""
+APPROVER_EMAIL=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resolution)
+      RESOLUTION_NAME="${2:-}"
+      shift 2
+      ;;
+    --approver)
+      APPROVER_EMAIL="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "Error: Unknown argument '$1'" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# NOTE: always use `printf '%s' "$var" | jq ...` (never `echo "$var" | jq ...`)
+# to pass JSON through a pipe. This shell's `echo` re-interprets backslash
+# escapes, so a literal `\n` inside a JSON string (common in Jira text
+# fields) gets turned into a real newline byte and breaks jq's parser with
+# "Invalid string: control characters ... must be escaped". `printf '%s'`
+# passes the string through unmodified.
+
+# Get available transitions, with field metadata (resolution.allowedValues,
+# any other required fields such as a hidden "Approvers" picker) expanded.
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  "$JIRA_BASE/rest/api/3/issue/$ISSUE_KEY/transitions?expand=transitions.fields")
+
+http_code=$(printf '%s' "$response" | tail -1)
+body=$(printf '%s' "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Failed to get transitions (HTTP $http_code)" >&2
+  printf '%s' "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+# Find matching transition (case-insensitive)
+transition=$(printf '%s' "$body" | jq -c --arg status "$TARGET_STATUS" '
+  [.transitions[] | select(.name | ascii_downcase == ($status | ascii_downcase))] | .[0] // empty')
+
+if [[ -z "$transition" ]]; then
+  echo "Error: No transition found matching '$TARGET_STATUS' for $ISSUE_KEY" >&2
+  echo "Available transitions:" >&2
+  printf '%s' "$body" | jq -r '.transitions[] | "  - " + .name' >&2
+  exit 1
+fi
+
+transition_id=$(printf '%s' "$transition" | jq -r '.id')
+
+# Build the fields payload for the transition.
+fields_json="{}"
+
+if [[ -n "$RESOLUTION_NAME" ]]; then
+  resolution_id=$(printf '%s' "$transition" | jq -r --arg name "$RESOLUTION_NAME" '
+    .fields.resolution.allowedValues[]? | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id')
+
+  if [[ -z "$resolution_id" ]]; then
+    echo "Error: '$RESOLUTION_NAME' is not a valid resolution for transition '$TARGET_STATUS'." >&2
+    echo "Allowed resolutions:" >&2
+    printf '%s' "$transition" | jq -r '.fields.resolution.allowedValues[]?.name // empty | "  - " + .' >&2
+    exit 1
+  fi
+
+  fields_json=$(printf '%s' "$fields_json" | jq --arg id "$resolution_id" '. + {resolution: {id: $id}}')
+fi
+
+# Any field on this transition marked required, other than the standard
+# resolution field, needs a value too (e.g. a workflow-only "Approvers"
+# picker that reports required:false in its own schema but is enforced by
+# a validator anyway).
+other_required=$(printf '%s' "$transition" | jq -c '
+  .fields | to_entries
+  | map(select(.key != "resolution" and .value.required == true))')
+
+other_required_count=$(printf '%s' "$other_required" | jq 'length')
+
+if [[ "$other_required_count" -gt 0 ]]; then
+  if [[ -z "$APPROVER_EMAIL" ]]; then
+    echo "Error: Transition '$TARGET_STATUS' also requires:" >&2
+    printf '%s' "$other_required" | jq -r '.[] | "  - " + .value.name + " (" + .key + ")"' >&2
+    echo "If one of these is a user-picker field, rerun with --approver <email>." >&2
+    exit 1
+  fi
+
+  # Resolve email to accountId.
+  user_response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" \
+    -G "$JIRA_BASE/rest/api/3/user/search" \
+    --data-urlencode "query=$APPROVER_EMAIL")
+
+  user_http_code=$(printf '%s' "$user_response" | tail -1)
+  user_body=$(printf '%s' "$user_response" | sed '$d')
+
+  if [[ "$user_http_code" -ne 200 ]]; then
+    echo "Error: User search failed (HTTP $user_http_code)" >&2
+    printf '%s' "$user_body" | jq -r '.errorMessages[]? // .message // .' >&2
+    exit 1
+  fi
+
+  account_id=$(printf '%s' "$user_body" | jq -r '.[0].accountId // empty')
+
+  if [[ -z "$account_id" ]]; then
+    echo "Error: No user found for '$APPROVER_EMAIL'" >&2
+    exit 1
+  fi
+
+  # Apply the accountId to every other-required field whose schema looks
+  # like a user picker (single or multi). Anything else required that
+  # isn't a user picker still fails loudly below.
+  while IFS= read -r entry; do
+    field_key=$(printf '%s' "$entry" | jq -r '.key')
+    field_custom=$(printf '%s' "$entry" | jq -r '.value.schema.custom // ""')
+
+    if [[ "$field_custom" == *"multiuserpicker"* ]]; then
+      fields_json=$(printf '%s' "$fields_json" | jq --arg key "$field_key" --arg id "$account_id" \
+        '. + {($key): [{accountId: $id}]}')
+    elif [[ "$field_custom" == *"userpicker"* ]]; then
+      fields_json=$(printf '%s' "$fields_json" | jq --arg key "$field_key" --arg id "$account_id" \
+        '. + {($key): {accountId: $id}}')
+    else
+      field_name=$(printf '%s' "$entry" | jq -r '.value.name')
+      echo "Error: Required field '$field_name' ($field_key) is not a user-picker field; jira-transition doesn't know how to fill it in yet." >&2
+      exit 1
+    fi
+  done < <(printf '%s' "$other_required" | jq -c '.[]')
+fi
+
+transition_payload=$(jq -cn --arg id "$transition_id" --argjson fields "$fields_json" \
+  '{transition: {id: $id}, fields: $fields}')
+
+# Execute the transition
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -X POST \
+  -d "$transition_payload" \
+  "$JIRA_BASE/rest/api/3/issue/$ISSUE_KEY/transitions")
+
+http_code=$(printf '%s' "$response" | tail -1)
+body=$(printf '%s' "$response" | sed '$d')
+
+if [[ "$http_code" -ne 204 ]]; then
+  echo "Error: Transition failed (HTTP $http_code)" >&2
+  printf '%s' "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+if [[ -n "$RESOLUTION_NAME" ]]; then
+  echo "$ISSUE_KEY transitioned to '$TARGET_STATUS' with resolution '$RESOLUTION_NAME'."
+else
+  echo "$ISSUE_KEY transitioned to '$TARGET_STATUS'."
+fi

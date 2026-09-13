@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+CONFLUENCE_BASE="https://sophos.atlassian.net/wiki"
+JIRA_USER="jim.salinas@sophos.com"
+
+QUERY=""
+if [[ $# -gt 0 ]]; then
+  QUERY="$1"
+fi
+
+# Paginate to collect all spaces
+all_results="[]"
+start=0
+page_size=100
+
+while true; do
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" \
+    -G "$CONFLUENCE_BASE/rest/api/space" \
+    --data-urlencode "limit=$page_size" \
+    --data-urlencode "start=$start" \
+    --data-urlencode "type=global")
+
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "Error: Confluence API returned HTTP $http_code" >&2
+    echo "$body" | jq -r '.message // .errorMessages[]? // .' >&2
+    exit 1
+  fi
+
+  page_results=$(echo "$body" | jq '.results')
+  page_count=$(echo "$page_results" | jq 'length')
+  all_results=$(jq -n --argjson a "$all_results" --argjson b "$page_results" '$a + $b')
+
+  size=$(echo "$body" | jq '.size')
+  start=$((start + size))
+  if [[ "$page_count" -lt "$page_size" ]]; then
+    break
+  fi
+done
+
+# Client-side filter if query provided
+if [[ -n "$QUERY" ]]; then
+  filtered=$(echo "$all_results" | jq --arg q "$QUERY" '[.[] | select((.key | ascii_downcase | contains($q | ascii_downcase)) or (.name | ascii_downcase | contains($q | ascii_downcase)))]')
+else
+  filtered="$all_results"
+fi
+
+count=$(echo "$filtered" | jq 'length')
+if [[ "$count" -eq 0 ]]; then
+  echo "No spaces found matching '$QUERY'."
+  exit 0
+fi
+
+printf "%-15s %s\n" "KEY" "NAME"
+printf "%-15s %s\n" "---" "----"
+
+echo "$filtered" | jq -r '.[] | [.key, .name] | @tsv' | while IFS=$'\t' read -r key name; do
+  printf "%-15s %s\n" "$key" "$name"
+done

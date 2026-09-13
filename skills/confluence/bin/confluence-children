@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: confluence-children <PAGE-ID>" >&2
+  echo "Lists child pages of the given page." >&2
+  exit 1
+fi
+
+CONFLUENCE_BASE="https://sophos.atlassian.net/wiki"
+JIRA_USER="jim.salinas@sophos.com"
+PAGE_ID="$1"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$CONFLUENCE_BASE/rest/api/content/$PAGE_ID/child/page" \
+  --data-urlencode "expand=version" \
+  --data-urlencode "limit=50")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Confluence API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.message // .errorMessages[]? // .' >&2
+  exit 1
+fi
+
+count=$(echo "$body" | jq '.results | length')
+if [[ "$count" -eq 0 ]]; then
+  echo "No child pages found for page $PAGE_ID."
+  exit 0
+fi
+
+printf "%-12s %-50s %s\n" "ID" "TITLE" "LAST UPDATED"
+printf "%-12s %-50s %s\n" "--" "-----" "------------"
+
+echo "$body" | jq -r '.results[] | [
+  .id,
+  .title,
+  (.version.when // "—" | split("T")[0])
+] | @tsv' | while IFS=$'\t' read -r id title updated; do
+  printf "%-12s %-50s %s\n" "$id" "$title" "$updated"
+done

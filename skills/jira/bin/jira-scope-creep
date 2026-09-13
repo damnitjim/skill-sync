@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# jira-scope-creep — work added to (or removed from) a sprint after it started.
+#
+#   jira-scope-creep <boardId> [--sprint <id>] [--json]
+#
+# Defaults to the board's active sprint. Uses the Greenhopper sprint-report
+# endpoint, which tracks issues added after the sprint start (scope creep) and
+# punted issues (removed), with their point impact.
+#
+# Auth: JIRA_API_TOKEN (required).
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+JSON_OUT=false
+BOARD_ID=""
+SPRINT_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sprint) SPRINT_ID="$2"; shift 2 ;;
+    --json)   JSON_OUT=true; shift ;;
+    -*)       echo "Unknown option: $1" >&2; exit 1 ;;
+    *)        BOARD_ID="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$BOARD_ID" ]]; then
+  echo "Usage: jira-scope-creep <boardId> [--sprint <id>] [--json]" >&2
+  exit 1
+fi
+
+api_get() {
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" "$JIRA_BASE$1")
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "HTTP $http_code on $1" >&2
+    echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2 2>/dev/null || true
+    return 1
+  fi
+  echo "$body"
+}
+
+# Resolve active sprint if none supplied.
+if [[ -z "$SPRINT_ID" ]]; then
+  active=$(api_get "/rest/agile/1.0/board/$BOARD_ID/sprint?state=active&maxResults=1") || exit 1
+  SPRINT_ID=$(echo "$active" | jq -r '.values[0].id // empty')
+  if [[ -z "$SPRINT_ID" ]]; then
+    echo "No active sprint found for board $BOARD_ID. Pass --sprint <id>." >&2
+    exit 1
+  fi
+fi
+
+report=$(api_get "/rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=$BOARD_ID&sprintId=$SPRINT_ID") || exit 1
+
+result=$(echo "$report" | jq '
+  def pts: (.estimateStatistic.statFieldValue.value // 0);
+  {
+    sprint: .sprint.name,
+    sprint_id: .sprint.id,
+    added_after_start: [
+      (.contents.issueKeysAddedDuringSprint // {} | keys[])
+    ],
+    added_count: ((.contents.issueKeysAddedDuringSprint // {}) | length),
+    punted: [ .contents.puntedIssues[]? | {key: .key, summary: .summary, points: pts} ],
+    punted_points: ([ .contents.puntedIssues[]? | pts ] | add // 0),
+    completed_points: (.contents.completedIssuesEstimateSum.value // 0),
+    committed_points: (.contents.allIssuesEstimateSum.value // 0)
+  }')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$result"
+  exit 0
+fi
+
+echo "$result" | jq -r '
+  "Sprint: \(.sprint)",
+  "Added after start: \(.added_count) issue(s) \(.added_after_start)",
+  "Punted (removed): \(.punted | length) issue(s), \(.punted_points) pts",
+  "Committed: \(.committed_points) pts   Completed: \(.completed_points) pts"'

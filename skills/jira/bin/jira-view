@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: jira-view <ISSUE-KEY>" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+ISSUE_KEY="$1"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  "$JIRA_BASE/rest/api/3/issue/$ISSUE_KEY?fields=summary,status,priority,issuetype,assignee,reporter,description,comment,customfield_10016,created,updated")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+echo "$body" | jq -r '
+  "Issue:       " + .key,
+  "Summary:     " + .fields.summary,
+  "Status:      " + .fields.status.name,
+  "Priority:    " + .fields.priority.name,
+  "Type:        " + .fields.issuetype.name,
+  "Assignee:    " + (.fields.assignee.displayName // "Unassigned"),
+  "Reporter:    " + (.fields.reporter.displayName // "Unknown"),
+  "Story Points: " + (if .fields.customfield_10016 then (.fields.customfield_10016 | tostring) else "--" end),
+  "Created:     " + .fields.created,
+  "Updated:     " + .fields.updated,
+  "",
+  "--- Description ---",
+  (if .fields.description then
+    [.fields.description.content[]? | .. | .text? // empty] | join("")
+  else
+    "(no description)"
+  end),
+  "",
+  "--- Comments (" + (.fields.comment.comments | length | tostring) + ") ---",
+  (.fields.comment.comments[-3:]? // [] | .[] |
+    "\n[" + .author.displayName + " - " + .created + "]",
+    ([.body.content[]? | .. | .text? // empty] | join(""))
+  )
+'

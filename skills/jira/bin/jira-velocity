@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# jira-velocity — rolling velocity + say-do ratio for a Scrum board.
+#
+#   jira-velocity <boardId> [--sprints N] [--json]
+#
+# Resolves closed sprints for the board, then reads committed vs completed
+# story points from the Greenhopper sprint-report endpoint (falls back to
+# summing customfield_10016 over the Agile API if that endpoint is blocked).
+#
+# Auth: JIRA_API_TOKEN (required).
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+SPRINTS=3
+JSON_OUT=false
+BOARD_ID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sprints) SPRINTS="$2"; shift 2 ;;
+    --json)    JSON_OUT=true; shift ;;
+    -*)        echo "Unknown option: $1" >&2; exit 1 ;;
+    *)         BOARD_ID="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$BOARD_ID" ]]; then
+  echo "Usage: jira-velocity <boardId> [--sprints N] [--json]" >&2
+  echo "Find the board id: curl -s -u \"\$JIRA_USER:\$JIRA_API_TOKEN\" \\" >&2
+  echo "  \"$JIRA_BASE/rest/agile/1.0/board?projectKeyOrId=DE\" | jq '.values[] | {id,name}'" >&2
+  exit 1
+fi
+
+api_get() {
+  # api_get <path-with-query>  -> prints body, exits non-zero on HTTP error
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" \
+    "$JIRA_BASE$1")
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "HTTP $http_code on $1" >&2
+    echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2 2>/dev/null || true
+    return 1
+  fi
+  echo "$body"
+}
+
+# Step 1: list closed sprints for the board (paginated), newest last.
+echo "Fetching closed sprints for board $BOARD_ID..." >&2
+all_sprints="[]"
+start_at=0
+while true; do
+  page=$(api_get "/rest/agile/1.0/board/$BOARD_ID/sprint?state=closed&startAt=$start_at&maxResults=50") || exit 1
+  vals=$(echo "$page" | jq '.values')
+  n=$(echo "$vals" | jq 'length')
+  all_sprints=$(jq -n --argjson a "$all_sprints" --argjson b "$vals" '$a + $b')
+  is_last=$(echo "$page" | jq -r '.isLast // true')
+  start_at=$((start_at + n))
+  if [[ "$is_last" == "true" || "$n" -eq 0 ]]; then break; fi
+done
+
+# Most-recent N closed sprints, sorted by completeDate (fallback endDate/id).
+recent=$(echo "$all_sprints" | jq --argjson n "$SPRINTS" '
+  sort_by(.completeDate // .endDate // (.id | tostring)) | reverse | .[0:$n] | reverse')
+sprint_count=$(echo "$recent" | jq 'length')
+
+if [[ "$sprint_count" -eq 0 ]]; then
+  echo "No closed sprints found for board $BOARD_ID." >&2
+  exit 1
+fi
+
+# Step 2: per-sprint committed vs completed points.
+metrics="[]"
+while IFS=$'\t' read -r sid sname; do
+  [[ -z "$sid" ]] && continue
+  committed="" completed="" source="greenhopper"
+
+  gh=$(api_get "/rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=$BOARD_ID&sprintId=$sid" 2>/dev/null || true)
+  if [[ -n "$gh" ]] && echo "$gh" | jq -e '.contents' >/dev/null 2>&1; then
+    committed=$(echo "$gh" | jq -r '(.contents.allIssuesEstimateSum.value // 0)')
+    completed=$(echo "$gh" | jq -r '(.contents.completedIssuesEstimateSum.value // 0)')
+  fi
+
+  if [[ -z "$committed" || "$committed" == "null" ]]; then
+    # Fallback: sum customfield_10016 over the sprint's issues via Agile API.
+    source="agile-fallback"
+    issues=$(api_get "/rest/agile/1.0/sprint/$sid/issue?fields=customfield_10016,status&maxResults=200") || true
+    committed=$(echo "$issues" | jq '[.issues[].fields.customfield_10016 // 0] | add // 0')
+    completed=$(echo "$issues" | jq '[.issues[] | select(.fields.status.statusCategory.key == "done") | .fields.customfield_10016 // 0] | add // 0')
+  fi
+
+  metrics=$(jq -n --argjson m "$metrics" \
+    --arg name "$sname" --argjson committed "${committed:-0}" \
+    --argjson completed "${completed:-0}" --arg source "$source" '
+    $m + [{
+      sprint: $name,
+      committed: $committed,
+      completed: $completed,
+      say_do_ratio: (if $committed > 0 then (($completed / $committed) * 100 | floor) else 0 end),
+      source: $source
+    }]')
+done < <(echo "$recent" | jq -r '.[] | "\(.id)\t\(.name)"')
+
+result=$(echo "$metrics" | jq '{
+  board_id: '"$BOARD_ID"',
+  sprints: .,
+  average_velocity: (if length > 0 then ([.[].completed] | add / length | floor) else 0 end),
+  average_committed: (if length > 0 then ([.[].committed] | add / length | floor) else 0 end),
+  rolling_say_do_ratio: (
+    ([.[].committed] | add) as $c |
+    if $c > 0 then (([.[].completed] | add) / $c * 100 | floor) else 0 end)
+}')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$result"
+  exit 0
+fi
+
+echo
+printf "%-28s %-11s %-11s %-8s\n" "SPRINT" "COMMITTED" "COMPLETED" "SAY-DO"
+printf "%-28s %-11s %-11s %-8s\n" "------" "---------" "---------" "------"
+echo "$result" | jq -r '.sprints[] | [.sprint, .committed, .completed, (.say_do_ratio|tostring)+"%"] | @tsv' \
+  | while IFS=$'\t' read -r name c d r; do
+      printf "%-28s %-11s %-11s %-8s\n" "$name" "$c" "$d" "$r"
+    done
+echo
+echo "$result" | jq -r '"Average velocity : \(.average_velocity) pts\nAverage committed: \(.average_committed) pts\nRolling say-do   : \(.rolling_say_do_ratio)%"'

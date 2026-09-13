@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: confluence-search <QUERY> [--space SPACE_KEY] [--limit N]" >&2
+  echo "Example: confluence-search \"deployment guide\"" >&2
+  echo "Example: confluence-search \"runbook\" --space DE" >&2
+  exit 1
+fi
+
+CONFLUENCE_BASE="https://sophos.atlassian.net/wiki"
+JIRA_USER="jim.salinas@sophos.com"
+
+QUERY=""
+SPACE=""
+LIMIT=20
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --space) SPACE="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    *) QUERY="$QUERY $1"; shift ;;
+  esac
+done
+QUERY=$(echo "$QUERY" | sed 's/^ //')
+
+if [[ -z "$QUERY" ]]; then
+  echo "Error: Search query is required." >&2
+  exit 1
+fi
+
+# Build CQL query
+CQL="type = page AND text ~ \"$QUERY\""
+if [[ -n "$SPACE" ]]; then
+  CQL="$CQL AND space = \"$SPACE\""
+fi
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$CONFLUENCE_BASE/rest/api/content/search" \
+  --data-urlencode "cql=$CQL" \
+  --data-urlencode "limit=$LIMIT" \
+  --data-urlencode "expand=space,version")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Confluence API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.message // .errorMessages[]? // .' >&2
+  exit 1
+fi
+
+count=$(echo "$body" | jq '.results | length')
+if [[ "$count" -eq 0 ]]; then
+  echo "No pages found matching '$QUERY'."
+  exit 0
+fi
+
+printf "%-12s %-40s %-15s %s\n" "ID" "TITLE" "SPACE" "LAST UPDATED"
+printf "%-12s %-40s %-15s %s\n" "--" "-----" "-----" "------------"
+
+echo "$body" | jq -r '.results[] | [
+  .id,
+  .title,
+  (.space.key // "—"),
+  (.version.when // "—" | split("T")[0])
+] | @tsv' | while IFS=$'\t' read -r id title space updated; do
+  printf "%-12s %-40s %-15s %s\n" "$id" "$title" "$space" "$updated"
+done

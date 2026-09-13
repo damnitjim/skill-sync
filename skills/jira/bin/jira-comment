@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: jira-comment <ISSUE-KEY> <MESSAGE>" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+ISSUE_KEY="$1"
+shift
+MESSAGE="$*"
+
+# Atlassian Document Format (ADF) body
+payload=$(jq -n --arg msg "$MESSAGE" '{
+  body: {
+    version: 1,
+    type: "doc",
+    content: [{
+      type: "paragraph",
+      content: [{
+        type: "text",
+        text: $msg
+      }]
+    }]
+  }
+}')
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -X POST \
+  -d "$payload" \
+  "$JIRA_BASE/rest/api/3/issue/$ISSUE_KEY/comment")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 201 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+echo "Comment added to $ISSUE_KEY."

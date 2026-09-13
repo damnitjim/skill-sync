@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: jira-label <ISSUE-KEY> --add label1,label2 [--remove label3,label4]" >&2
+  echo "Example: jira-label DE-123 --add needs-elaboration,needs-ux" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+ISSUE_KEY="$1"
+shift
+
+ADD_LABELS=""
+REMOVE_LABELS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --add)
+      ADD_LABELS="$2"
+      shift 2
+      ;;
+    --remove)
+      REMOVE_LABELS="$2"
+      shift 2
+      ;;
+    *)
+      echo "Error: Unknown argument '$1'" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$ADD_LABELS" && -z "$REMOVE_LABELS" ]]; then
+  echo "Error: Must specify at least one of --add or --remove." >&2
+  exit 1
+fi
+
+# Build the "update.labels" array: [{"add":"foo"}, {"remove":"bar"}, ...]
+payload=$(jq -n \
+  --arg add "$ADD_LABELS" \
+  --arg remove "$REMOVE_LABELS" \
+  '
+  (if $add == "" then [] else ($add | split(",") | map({add: .})) end) as $adds |
+  (if $remove == "" then [] else ($remove | split(",") | map({remove: .})) end) as $removes |
+  {update: {labels: ($adds + $removes)}}
+  ')
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -X PUT \
+  -d "$payload" \
+  "$JIRA_BASE/rest/api/3/issue/$ISSUE_KEY")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 204 ]]; then
+  echo "Error: Label update failed (HTTP $http_code)" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+summary=""
+[[ -n "$ADD_LABELS" ]] && summary="added [$ADD_LABELS]"
+if [[ -n "$REMOVE_LABELS" ]]; then
+  [[ -n "$summary" ]] && summary="$summary, "
+  summary="${summary}removed [$REMOVE_LABELS]"
+fi
+
+echo "$ISSUE_KEY labels updated: $summary."

@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# jira-pr-activity — map DE tickets to their pull requests using Jira's
+# development panel (dev-status API), which already correlates PRs to tickets
+# and covers every repo a ticket touched (no branch-name guessing, no repo list).
+#
+#   jira-pr-activity --sprint                       # active-sprint tickets
+#   jira-pr-activity --jql "project = DE AND resolved >= -14d"
+#   jira-pr-activity --timing                       # enrich each PR with gh timing
+#   jira-pr-activity --json
+#
+# The dev-panel only carries a single `lastUpdate` per PR (no opened/merged/
+# review times). With --timing, each PR is enriched via `gh` with createdAt,
+# mergedAt, first-review time, review count, and size — the real latency data.
+#
+# Auth: JIRA_API_TOKEN (required); gh CLI logged in (only for --timing).
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+JQL="project = DE AND sprint in openSprints()"
+JSON_OUT=false
+TIMING=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sprint) JQL="project = DE AND sprint in openSprints()"; shift ;;
+    --jql)    JQL="$2"; shift 2 ;;
+    --timing) TIMING=true; shift ;;
+    --json)   JSON_OUT=true; shift ;;
+    *)        echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ "$TIMING" == "true" ]] && ! command -v gh >/dev/null 2>&1; then
+  echo "Error: --timing needs the gh CLI on PATH (and logged in)." >&2
+  exit 1
+fi
+
+api_get() {
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" "$JIRA_BASE$1")
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "HTTP $http_code on $1" >&2
+    return 1
+  fi
+  echo "$body"
+}
+
+# Step 1: tickets matching the JQL (need numeric ids for dev-status).
+search=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$JQL" \
+  --data-urlencode "fields=summary,customfield_10016" \
+  --data-urlencode "maxResults=100")
+http_code=$(echo "$search" | tail -1)
+body=$(echo "$search" | sed '$d')
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira search returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+count=$(echo "$body" | jq '.issues | length')
+if [[ "$count" -eq 0 ]]; then
+  echo "No tickets matched." >&2
+  exit 0
+fi
+
+echo "Resolving PRs for $count tickets via the Jira dev panel..." >&2
+
+# Step 2: per-ticket dev-status (two-step: summary -> instance key -> detail).
+tickets="[]"
+while IFS=$'\t' read -r iid ikey points summary; do
+  [[ -z "$iid" ]] && continue
+  sum=$(api_get "/rest/dev-status/1.0/issue/summary?issueId=$iid" 2>/dev/null || true)
+  inst=$(echo "$sum" | jq -r '(.summary.pullrequest.byInstanceType // {}) | keys[0] // empty' 2>/dev/null || true)
+  prs="[]"
+  if [[ -n "$inst" ]]; then
+    detail=$(api_get "/rest/dev-status/1.0/issue/detail?issueId=$iid&applicationType=$inst&dataType=pullrequest" 2>/dev/null || true)
+    prs=$(echo "$detail" | jq '[.detail[0].pullRequests[]? | {
+      number: (.id | ltrimstr("#")),
+      repo: .repositoryName,
+      status: .status,
+      url: .url,
+      title: .name,
+      last_update: .lastUpdate
+    }]' 2>/dev/null || echo "[]")
+  fi
+  tickets=$(jq -n --argjson t "$tickets" --arg key "$ikey" --arg sum "$summary" \
+    --argjson pts "${points:-null}" --argjson prs "$prs" '
+    $t + [{key: $key, summary: $sum, points: $pts, pull_requests: $prs}]')
+done < <(echo "$body" | jq -r '.issues[] | "\(.id)\t\(.key)\t\(.fields.customfield_10016 // "null")\t\(.fields.summary)"')
+
+# Step 3 (optional): enrich each PR with gh timing.
+if [[ "$TIMING" == "true" ]]; then
+  echo "Enriching PRs with gh timing..." >&2
+  enriched="[]"
+  while read -r t; do
+    key=$(echo "$t" | jq -r '.key')
+    new_prs="[]"
+    while read -r pr; do
+      [[ -z "$pr" || "$pr" == "null" ]] && continue
+      repo=$(echo "$pr" | jq -r '.repo')
+      num=$(echo "$pr" | jq -r '.number')
+      timing='{}'
+      if [[ -n "$repo" && -n "$num" && "$repo" != "null" ]]; then
+        ghjson=$(gh pr view "$num" --repo "$repo" \
+          --json createdAt,mergedAt,closedAt,additions,deletions,reviews 2>/dev/null || echo '{}')
+        timing=$(echo "$ghjson" | jq '{
+          created_at: .createdAt,
+          merged_at: .mergedAt,
+          first_review_at: (.reviews // [] | sort_by(.submittedAt) | .[0].submittedAt),
+          review_count: (.reviews // [] | length),
+          size: ((.additions // 0) + (.deletions // 0)),
+          open_to_merge_hours: (if .createdAt and .mergedAt then
+            (((.mergedAt|sub("\\.[0-9]+";"")|sub("Z$";"")|strptime("%Y-%m-%dT%H:%M:%S")|mktime)
+            - (.createdAt|sub("\\.[0-9]+";"")|sub("Z$";"")|strptime("%Y-%m-%dT%H:%M:%S")|mktime)) / 3600 | floor)
+            else null end),
+          open_to_first_review_hours: (
+            (.reviews // [] | sort_by(.submittedAt) | .[0].submittedAt) as $fr |
+            if .createdAt and $fr then
+            ((($fr|sub("\\.[0-9]+";"")|sub("Z$";"")|strptime("%Y-%m-%dT%H:%M:%S")|mktime)
+            - (.createdAt|sub("\\.[0-9]+";"")|sub("Z$";"")|strptime("%Y-%m-%dT%H:%M:%S")|mktime)) / 3600 | floor)
+            else null end)
+        }' 2>/dev/null || echo '{}')
+      fi
+      merged=$(echo "$pr" | jq --argjson tm "$timing" '. + {timing: $tm}')
+      new_prs=$(jq -n --argjson a "$new_prs" --argjson b "$merged" '$a + [$b]')
+    done < <(echo "$t" | jq -c '.pull_requests[]?')
+    enriched=$(jq -n --argjson a "$enriched" --argjson t "$t" --argjson prs "$new_prs" \
+      '$a + [($t + {pull_requests: $prs})]')
+  done < <(echo "$tickets" | jq -c '.[]')
+  tickets="$enriched"
+fi
+
+result=$(echo "$tickets" | jq '{
+  ticket_count: length,
+  pr_count: ([.[].pull_requests[]?] | length),
+  repos: ([.[].pull_requests[]?.repo] | unique),
+  tickets: .
+}')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$result"
+  exit 0
+fi
+
+echo
+echo "$result" | jq -r '
+  "Tickets: \(.ticket_count)   PRs: \(.pr_count)   Repos touched: \(.repos | length)",
+  "",
+  (.tickets[] | "\(.key)  \(.summary)",
+    (.pull_requests[]? | "    [\(.status)] \(.repo)#\(.number)"
+      + (if .timing.open_to_merge_hours != null then "  (\(.timing.open_to_merge_hours)h to merge)" else "" end)))'

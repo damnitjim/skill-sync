@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+JSON_OUT=false
+[[ "${1:-}" == "--json" ]] && JSON_OUT=true
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+JQL="project = DE AND sprint in openSprints() ORDER BY rank"
+FIELDS="summary,status,priority,issuetype,assignee,customfield_10016"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$JQL" \
+  --data-urlencode "fields=$FIELDS" \
+  --data-urlencode "maxResults=200")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+count=$(echo "$body" | jq '.issues | length')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$body" | jq '{
+    total: (.issues | length),
+    issues: [.issues[] | {
+      key: .key,
+      summary: .fields.summary,
+      status: .fields.status.name,
+      status_category: .fields.status.statusCategory.key,
+      priority: .fields.priority.name,
+      type: .fields.issuetype.name,
+      assignee: (.fields.assignee.displayName // "Unassigned"),
+      points: .fields.customfield_10016
+    }]
+  }'
+  exit 0
+fi
+
+if [[ "$count" -eq 0 ]]; then
+  echo "No issues found in active sprint for project DE."
+  exit 0
+fi
+
+printf "%-10s %-15s %-10s %-12s %-20s %-7s %s\n" "KEY" "STATUS" "PRIORITY" "TYPE" "ASSIGNEE" "SP" "SUMMARY"
+printf "%-10s %-15s %-10s %-12s %-20s %-7s %s\n" "---" "------" "--------" "----" "--------" "--" "-------"
+
+echo "$body" | jq -r '.issues[] | [
+  .key,
+  .fields.status.name,
+  .fields.priority.name,
+  .fields.issuetype.name,
+  (.fields.assignee.displayName // "Unassigned"),
+  (if .fields.customfield_10016 then ("SP:" + (.fields.customfield_10016 | tostring)) else "SP:--" end),
+  .fields.summary
+] | @tsv' | while IFS=$'\t' read -r key status priority type assignee sp summary; do
+  printf "%-10s %-15s %-10s %-12s %-20s %-7s %s\n" "$key" "$status" "$priority" "$type" "$assignee" "$sp" "$summary"
+done

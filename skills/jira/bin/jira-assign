@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: jira-assign <ISSUE-KEY> <EMAIL>" >&2
+  echo "Example: jira-assign DE-123 user@sophos.com" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+ISSUE_KEY="$1"
+ASSIGNEE_EMAIL="$2"
+
+# Look up accountId from email
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/user/search" \
+  --data-urlencode "query=$ASSIGNEE_EMAIL")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: User search failed (HTTP $http_code)" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+account_id=$(echo "$body" | jq -r '.[0].accountId // empty')
+
+if [[ -z "$account_id" ]]; then
+  echo "Error: No user found for '$ASSIGNEE_EMAIL'" >&2
+  exit 1
+fi
+
+# Assign the issue
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -X PUT \
+  -d "{\"accountId\":\"$account_id\"}" \
+  "$JIRA_BASE/rest/api/3/issue/$ISSUE_KEY/assignee")
+
+http_code=$(echo "$response" | tail -1)
+
+if [[ "$http_code" -ne 204 ]]; then
+  body=$(echo "$response" | sed '$d')
+  echo "Error: Assignment failed (HTTP $http_code)" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+echo "$ISSUE_KEY assigned to $ASSIGNEE_EMAIL."

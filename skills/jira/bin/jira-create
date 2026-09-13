@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+
+# Defaults
+PROJECT="DE"
+ISSUE_TYPE="Task"
+SUMMARY=""
+DESCRIPTION=""
+
+usage() {
+  echo "Usage: jira-create --summary <SUMMARY> [--project <KEY>] [--type <TYPE>] [--description <DESC>]" >&2
+  echo "  --project      Project key (default: DE)" >&2
+  echo "  --type         Issue type: Task, Bug, Story, Epic (default: Task)" >&2
+  echo "  --summary      Issue summary (required)" >&2
+  echo "  --description  Issue description" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) PROJECT="$2"; shift 2 ;;
+    --type) ISSUE_TYPE="$2"; shift 2 ;;
+    --summary) SUMMARY="$2"; shift 2 ;;
+    --description) DESCRIPTION="$2"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; usage ;;
+  esac
+done
+
+if [[ -z "$SUMMARY" ]]; then
+  echo "Error: --summary is required." >&2
+  usage
+fi
+
+# Build payload
+payload=$(jq -n \
+  --arg project "$PROJECT" \
+  --arg type "$ISSUE_TYPE" \
+  --arg summary "$SUMMARY" \
+  --arg desc "$DESCRIPTION" \
+  '{
+    fields: {
+      project: { key: $project },
+      issuetype: { name: $type },
+      summary: $summary
+    }
+  } | if $desc != "" then .fields.description = {
+    version: 1,
+    type: "doc",
+    content: [{
+      type: "paragraph",
+      content: [{
+        type: "text",
+        text: $desc
+      }]
+    }]
+  } else . end')
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -X POST \
+  -d "$payload" \
+  "$JIRA_BASE/rest/api/3/issue")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 201 ]]; then
+  echo "Error: Failed to create issue (HTTP $http_code)" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .errors // .message // .' >&2
+  exit 1
+fi
+
+key=$(echo "$body" | jq -r '.key')
+echo "Created $key: $JIRA_BASE/browse/$key"

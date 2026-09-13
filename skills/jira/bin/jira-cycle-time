@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# jira-cycle-time — per-issue time spent in each workflow status, derived from
+# the issue changelog. Reports lead time (created -> done) and cycle time
+# (first In Progress -> done), plus time-in-review.
+#
+#   jira-cycle-time --sprint            # issues in the active sprint (default)
+#   jira-cycle-time --jql "project = DE AND resolved >= -14d"
+#   jira-cycle-time --json
+#
+# Auth: JIRA_API_TOKEN (required).
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+JSON_OUT=false
+JQL="project = DE AND sprint in openSprints()"
+# DE story flow: Backlog -> In Progress -> QA (peer review + test) -> Resolved.
+# "QA" is the review/verification phase, so time-in-review == time-in-QA.
+REVIEW_STATUS="QA"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sprint) JQL="project = DE AND sprint in openSprints()"; shift ;;
+    --jql)    JQL="$2"; shift 2 ;;
+    --review-status) REVIEW_STATUS="$2"; shift 2 ;;
+    --json)   JSON_OUT=true; shift ;;
+    *)        echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+api_get() {
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" "$JIRA_BASE$1")
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "HTTP $http_code on $1" >&2
+    echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2 2>/dev/null || true
+    return 1
+  fi
+  echo "$body"
+}
+
+# Fetch matching issue keys.
+resp=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$JQL" \
+  --data-urlencode "fields=summary,status,created" \
+  --data-urlencode "maxResults=100")
+http_code=$(echo "$resp" | tail -1)
+body=$(echo "$resp" | sed '$d')
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira search returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+keys=$(echo "$body" | jq -r '.issues[].key')
+if [[ -z "$keys" ]]; then
+  echo "No issues matched." >&2
+  exit 0
+fi
+
+# Walk each issue's changelog and compute durations between status changes.
+results="[]"
+for key in $keys; do
+  cl=$(api_get "/rest/api/3/issue/$key?fields=summary,status,created&expand=changelog") || continue
+  metrics=$(echo "$cl" | jq --arg review "$REVIEW_STATUS" '
+    # Drop fractional seconds + timezone; we only need day-granularity diffs.
+    def to_epoch: (try (sub("\\.[0-9].*$"; "") | strptime("%Y-%m-%dT%H:%M:%S") | mktime) catch null);
+    (.fields.created | to_epoch) as $created |
+    ([.changelog.histories[]? as $h | $h.items[]? | select(.field == "status")
+      | {when: ($h.created | to_epoch), from: .fromString, to: .toString}]
+     | sort_by(.when)) as $transitions |
+    ($transitions | map(select(.to == "In Progress")) | first) as $first_ip |
+    ($transitions | map(select(.to == "Done" or .to == "Closed" or .to == "Resolved")) | last) as $done |
+    ($transitions | map(select(.to == $review)) | first) as $review_in |
+    ($transitions | map(select(.from == $review)) | first) as $review_out |
+    {
+      key: "'"$key"'",
+      summary: .fields.summary,
+      status: .fields.status.name,
+      lead_time_days: (if $done and $created then (($done.when - $created) / 86400 | floor) else null end),
+      cycle_time_days: (if $done and $first_ip then (($done.when - $first_ip.when) / 86400 | floor) else null end),
+      review_time_days: (if $review_out and $review_in then (($review_out.when - $review_in.when) / 86400 | floor) else null end)
+    }')
+  results=$(jq -n --argjson a "$results" --argjson b "$metrics" '$a + [$b]')
+done
+
+result=$(echo "$results" | jq '{
+  count: length,
+  avg_lead_time_days: ([.[].lead_time_days | select(. != null)] | if length > 0 then (add / length | floor) else null end),
+  avg_cycle_time_days: ([.[].cycle_time_days | select(. != null)] | if length > 0 then (add / length | floor) else null end),
+  avg_review_time_days: ([.[].review_time_days | select(. != null)] | if length > 0 then (add / length | floor) else null end),
+  issues: .
+}')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$result"
+  exit 0
+fi
+
+echo "$result" | jq -r '"Issues: \(.count)   Avg lead: \(.avg_lead_time_days)d   Avg cycle: \(.avg_cycle_time_days)d   Avg review: \(.avg_review_time_days)d"'
+echo
+printf "%-10s %-6s %-6s %-7s %s\n" "KEY" "LEAD" "CYCLE" "REVIEW" "SUMMARY"
+printf "%-10s %-6s %-6s %-7s %s\n" "---" "----" "-----" "------" "-------"
+echo "$result" | jq -r '.issues[] | [.key, (.lead_time_days // "-"|tostring), (.cycle_time_days // "-"|tostring), (.review_time_days // "-"|tostring), .summary] | @tsv' \
+  | while IFS=$'\t' read -r key lead cycle review summary; do
+      printf "%-10s %-6s %-6s %-7s %s\n" "$key" "$lead" "$cycle" "$review" "$summary"
+    done

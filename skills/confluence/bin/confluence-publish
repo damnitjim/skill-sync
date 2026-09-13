@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# confluence-publish — create or update a Confluence page from a storage-format
+# (XHTML) body file. On PATH via `skills sync`.
+#
+#   confluence-publish create --space-key MDR --parent <pageOrFolderId> \
+#       --title "Sprint 42 Retro" --body-file body.html
+#   confluence-publish update --page-id <id> \
+#       --title "Sprint 42 Retro" --body-file body.html
+#
+# Auth: JIRA_API_TOKEN (required). User defaults to jim.salinas@sophos.com
+# (override with CONFLUENCE_USER). Uses the Confluence Cloud v2 API.
+set -euo pipefail
+
+CONFLUENCE_BASE="${CONFLUENCE_BASE:-https://sophos.atlassian.net/wiki}"
+CONFLUENCE_USER="${CONFLUENCE_USER:-jim.salinas@sophos.com}"
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Generate one at https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+CMD="${1:-}"; shift || true
+SPACE_KEY="" PARENT="" PAGE_ID="" TITLE="" BODY_FILE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --space-key) SPACE_KEY="$2"; shift 2 ;;
+    --parent)    PARENT="$2";    shift 2 ;;
+    --page-id)   PAGE_ID="$2";   shift 2 ;;
+    --title)     TITLE="$2";     shift 2 ;;
+    --body-file) BODY_FILE="$2"; shift 2 ;;
+    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -n "$TITLE" && -n "$BODY_FILE" ]] || { echo "Error: --title and --body-file are required" >&2; exit 1; }
+[[ -f "$BODY_FILE" ]] || { echo "Error: body file not found: $BODY_FILE" >&2; exit 1; }
+
+export CONFLUENCE_BASE CONFLUENCE_USER JIRA_API_TOKEN CMD SPACE_KEY PARENT PAGE_ID TITLE BODY_FILE
+
+python3 - <<'PY'
+import os, sys, json, base64, urllib.request, urllib.error
+
+base  = os.environ["CONFLUENCE_BASE"]
+user  = os.environ["CONFLUENCE_USER"]
+token = os.environ["JIRA_API_TOKEN"]
+cmd   = os.environ["CMD"]
+auth  = "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode()
+
+def call(method, path, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    req.add_header("Authorization", auth)
+    req.add_header("Accept", "application/json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        sys.stderr.write(f"HTTP {e.code} on {method} {path}\n{e.read().decode()}\n")
+        sys.exit(1)
+
+body  = open(os.environ["BODY_FILE"]).read()
+title = os.environ["TITLE"]
+
+if cmd == "create":
+    space_key = os.environ["SPACE_KEY"]
+    parent    = os.environ["PARENT"] or None
+    if not space_key:
+        sys.stderr.write("create requires --space-key\n"); sys.exit(1)
+    _, sp = call("GET", f"/api/v2/spaces?keys={space_key}")
+    results = sp.get("results", [])
+    if not results:
+        sys.stderr.write(f"Space key not found: {space_key}\n"); sys.exit(1)
+    space_id = results[0]["id"]
+    payload = {"spaceId": space_id, "status": "current", "title": title,
+               "body": {"representation": "storage", "value": body}}
+    if parent:
+        payload["parentId"] = parent
+    _, d = call("POST", "/api/v2/pages", payload)
+
+elif cmd == "update":
+    page_id = os.environ["PAGE_ID"]
+    if not page_id:
+        sys.stderr.write("update requires --page-id\n"); sys.exit(1)
+    _, cur = call("GET", f"/api/v2/pages/{page_id}")
+    next_ver = cur["version"]["number"] + 1
+    payload = {"id": page_id, "status": "current", "title": title,
+               "body": {"representation": "storage", "value": body},
+               "version": {"number": next_ver, "message": "Updated via confluence-publish"}}
+    _, d = call("PUT", f"/api/v2/pages/{page_id}", payload)
+
+else:
+    sys.stderr.write("Usage: confluence-publish {create|update} ...\n"); sys.exit(1)
+
+links = d.get("_links", {}) or {}
+print("page id:", d.get("id"))
+print("version:", (d.get("version") or {}).get("number"))
+print("URL:", links.get("base", "") + links.get("webui", ""))
+PY

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: confluence-page <PAGE-ID|PAGE-TITLE> [--space SPACE_KEY]" >&2
+  echo "Example: confluence-page 123456789" >&2
+  echo "Example: confluence-page \"Deployment Guide\" --space DE" >&2
+  exit 1
+fi
+
+CONFLUENCE_BASE="https://sophos.atlassian.net/wiki"
+JIRA_USER="jim.salinas@sophos.com"
+
+PAGE_REF=""
+SPACE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --space) SPACE="$2"; shift 2 ;;
+    *) PAGE_REF="$1"; shift ;;
+  esac
+done
+
+# Determine if PAGE_REF is an ID (numeric) or a title
+if [[ "$PAGE_REF" =~ ^[0-9]+$ ]]; then
+  PAGE_ID="$PAGE_REF"
+else
+  # Look up page by title
+  CQL="type = page AND title = \"$PAGE_REF\""
+  if [[ -n "$SPACE" ]]; then
+    CQL="$CQL AND space = \"$SPACE\""
+  fi
+
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" \
+    -G "$CONFLUENCE_BASE/rest/api/content/search" \
+    --data-urlencode "cql=$CQL" \
+    --data-urlencode "limit=10")
+
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "Error: Confluence API returned HTTP $http_code" >&2
+    echo "$body" | jq -r '.message // .errorMessages[]? // .' >&2
+    exit 1
+  fi
+
+  match_count=$(echo "$body" | jq '.results | length')
+
+  if [[ "$match_count" -eq 0 ]]; then
+    echo "No page found with title '$PAGE_REF'." >&2
+    exit 1
+  fi
+
+  if [[ "$match_count" -gt 1 ]]; then
+    echo "Multiple pages match '$PAGE_REF'. Please specify --space or use a page ID:" >&2
+    echo "$body" | jq -r '.results[] | "  - " + .title + " (id: " + .id + ", space: " + (.space.key // "?") + ")"' >&2
+    exit 1
+  fi
+
+  PAGE_ID=$(echo "$body" | jq -r '.results[0].id')
+fi
+
+# Fetch the full page content
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$CONFLUENCE_BASE/rest/api/content/$PAGE_ID" \
+  --data-urlencode "expand=body.storage,space,version,ancestors")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Confluence API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.message // .errorMessages[]? // .' >&2
+  exit 1
+fi
+
+# Display page metadata
+title=$(echo "$body" | jq -r '.title')
+space_key=$(echo "$body" | jq -r '.space.key // "—"')
+space_name=$(echo "$body" | jq -r '.space.name // "—"')
+version=$(echo "$body" | jq -r '.version.number')
+author=$(echo "$body" | jq -r '.version.by.displayName // "unknown"')
+updated=$(echo "$body" | jq -r '.version.when // "—"')
+page_url="$CONFLUENCE_BASE/spaces/$space_key/pages/$PAGE_ID"
+
+echo "=== $title ==="
+echo "Space:    $space_name ($space_key)"
+echo "Version:  $version (by $author)"
+echo "Updated:  $updated"
+echo "URL:      $page_url"
+echo ""
+
+# Extract and display page content as plain text (strip HTML tags)
+echo "$body" | jq -r '.body.storage.value // "(no content)"' | \
+  sed 's/<br[^>]*>/\n/g' | \
+  sed 's/<\/p>/\n/g' | \
+  sed 's/<\/h[1-6]>/\n/g' | \
+  sed 's/<\/li>/\n/g' | \
+  sed 's/<\/tr>/\n/g' | \
+  sed 's/<\/div>/\n/g' | \
+  sed 's/<[^>]*>//g' | \
+  sed 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#39;/'"'"'/g; s/&nbsp;/ /g' | \
+  sed '/^[[:space:]]*$/d'

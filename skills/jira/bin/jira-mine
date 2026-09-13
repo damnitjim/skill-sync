@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+JQL="assignee = currentUser() AND resolution = Unresolved ORDER BY priority DESC, updated DESC"
+FIELDS="summary,status,priority,issuetype,customfield_10016"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$JQL" \
+  --data-urlencode "fields=$FIELDS" \
+  --data-urlencode "maxResults=50")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+count=$(echo "$body" | jq '.issues | length')
+if [[ "$count" -eq 0 ]]; then
+  echo "No unresolved issues assigned to you."
+  exit 0
+fi
+
+printf "%-10s %-15s %-10s %-12s %-7s %s\n" "KEY" "STATUS" "PRIORITY" "TYPE" "SP" "SUMMARY"
+printf "%-10s %-15s %-10s %-12s %-7s %s\n" "---" "------" "--------" "----" "--" "-------"
+
+echo "$body" | jq -r '.issues[] | [
+  .key,
+  .fields.status.name,
+  .fields.priority.name,
+  .fields.issuetype.name,
+  (if .fields.customfield_10016 then ("SP:" + (.fields.customfield_10016 | tostring)) else "SP:--" end),
+  .fields.summary
+] | @tsv' | while IFS=$'\t' read -r key status priority type sp summary; do
+  printf "%-10s %-15s %-10s %-12s %-7s %s\n" "$key" "$status" "$priority" "$type" "$sp" "$summary"
+done

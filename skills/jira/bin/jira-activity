@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# jira-activity — one person's recent Jira activity, for 1:1 prep.
+# Groups their issues into resolved / in-progress / other over a window.
+#
+#   jira-activity <email> [--since -14d] [--project DE] [--json]
+#
+# Auth: JIRA_API_TOKEN (required).
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+SINCE="-14d"
+PROJECT="DE"
+JSON_OUT=false
+EMAIL=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since)   SINCE="$2"; shift 2 ;;
+    --project) PROJECT="$2"; shift 2 ;;
+    --json)    JSON_OUT=true; shift ;;
+    -*)        echo "Unknown option: $1" >&2; exit 1 ;;
+    *)         EMAIL="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$EMAIL" ]]; then
+  echo "Usage: jira-activity <email> [--since -14d] [--project DE] [--json]" >&2
+  exit 1
+fi
+
+JQL="project = $PROJECT AND assignee = \"$EMAIL\" AND updated >= $SINCE ORDER BY updated DESC"
+FIELDS="summary,status,issuetype,priority,customfield_10016,updated,resolutiondate"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$JQL" \
+  --data-urlencode "fields=$FIELDS" \
+  --data-urlencode "maxResults=200")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+result=$(echo "$body" | jq --arg email "$EMAIL" --arg since "$SINCE" '{
+  person: $email,
+  since: $since,
+  total: (.issues | length),
+  resolved: [.issues[] | select(.fields.status.statusCategory.key == "done") | {key: .key, summary: .fields.summary, points: .fields.customfield_10016, resolved: .fields.resolutiondate}],
+  in_progress: [.issues[] | select(.fields.status.statusCategory.key == "indeterminate") | {key: .key, summary: .fields.summary, status: .fields.status.name, points: .fields.customfield_10016}],
+  other: [.issues[] | select(.fields.status.statusCategory.key == "new") | {key: .key, summary: .fields.summary, status: .fields.status.name}]
+}')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+  echo "$result"
+  exit 0
+fi
+
+echo "$result" | jq -r '
+  "Activity for \(.person) (since \(.since)) — \(.total) issues",
+  "",
+  "Resolved (\(.resolved | length)):",
+  (.resolved[] | "  ✅ \(.key)  \(.summary)"),
+  "",
+  "In progress (\(.in_progress | length)):",
+  (.in_progress[] | "  🔨 \(.key)  [\(.status)] \(.summary)"),
+  "",
+  "Other (\(.other | length)):",
+  (.other[] | "  • \(.key)  [\(.status)] \(.summary)")'

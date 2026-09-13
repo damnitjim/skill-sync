@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -z "${JIRA_API_TOKEN:-}" ]]; then
+  echo "Error: JIRA_API_TOKEN is not set. Export it in your shell profile." >&2
+  echo "Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens" >&2
+  exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: jira-filter <FILTER-NAME>" >&2
+  echo "Example: jira-filter \"EAP Scope\"" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://sophos.atlassian.net"
+JIRA_USER="jim.salinas@sophos.com"
+FILTER_NAME="$1"
+
+# Step 1: Search for saved filters by name, paginating to collect all matches
+all_values="[]"
+start_at=0
+page_size=100
+
+while true; do
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "$JIRA_USER:$JIRA_API_TOKEN" \
+    -H "Accept: application/json" \
+    -G "$JIRA_BASE/rest/api/3/filter/search" \
+    --data-urlencode "filterName=$FILTER_NAME" \
+    --data-urlencode "startAt=$start_at" \
+    --data-urlencode "maxResults=$page_size")
+
+  http_code=$(echo "$response" | tail -1)
+  body=$(echo "$response" | sed '$d')
+
+  if [[ "$http_code" -ne 200 ]]; then
+    echo "Error: Jira API returned HTTP $http_code" >&2
+    echo "$body" | jq -r '.errorMessages[]? // .message // .errors // .' >&2
+    exit 1
+  fi
+
+  page_values=$(echo "$body" | jq '.values')
+  page_count=$(echo "$page_values" | jq 'length')
+  all_values=$(jq -n --argjson a "$all_values" --argjson b "$page_values" '$a + $b')
+
+  total=$(echo "$body" | jq '.total')
+  start_at=$((start_at + page_count))
+  if [[ "$start_at" -ge "$total" || "$page_count" -eq 0 ]]; then
+    break
+  fi
+done
+
+# Client-side filter: narrow to filters whose name contains the full search string (case-insensitive)
+filtered=$(echo "$all_values" | jq --arg name "$FILTER_NAME" '[.[] | select(.name | ascii_downcase | contains($name | ascii_downcase))]')
+match_count=$(echo "$filtered" | jq 'length')
+
+if [[ "$match_count" -eq 0 ]]; then
+  echo "No saved filters matching '$FILTER_NAME' found." >&2
+  exit 1
+fi
+
+if [[ "$match_count" -gt 1 ]]; then
+  echo "Multiple filters match '$FILTER_NAME'. Please be more specific:" >&2
+  echo "$filtered" | jq -r '.[] | "  - " + .name + " (id: " + .id + ", owner: " + (.owner.displayName // "unknown") + ")"' >&2
+  exit 1
+fi
+
+# Fetch the full filter details (the search endpoint doesn't include JQL)
+filter_id=$(echo "$filtered" | jq -r '.[0].id')
+filter_name=$(echo "$filtered" | jq -r '.[0].name')
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  "$JIRA_BASE/rest/api/3/filter/$filter_id")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Failed to fetch filter details (HTTP $http_code)" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .errors // .' >&2
+  exit 1
+fi
+
+filter_jql=$(echo "$body" | jq -r '.jql')
+echo "Running filter: $filter_name"
+
+# Step 2: Execute the filter's JQL
+FIELDS="summary,status,priority,issuetype,assignee,customfield_10016"
+
+response=$(curl -s -w "\n%{http_code}" \
+  -u "$JIRA_USER:$JIRA_API_TOKEN" \
+  -H "Accept: application/json" \
+  -G "$JIRA_BASE/rest/api/3/search/jql" \
+  --data-urlencode "jql=$filter_jql" \
+  --data-urlencode "fields=$FIELDS" \
+  --data-urlencode "maxResults=200")
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+if [[ "$http_code" -ne 200 ]]; then
+  echo "Error: Jira API returned HTTP $http_code" >&2
+  echo "$body" | jq -r '.errorMessages[]? // .message // .' >&2
+  exit 1
+fi
+
+count=$(echo "$body" | jq '.issues | length')
+if [[ "$count" -eq 0 ]]; then
+  echo "Filter '$filter_name' returned no issues."
+  exit 0
+fi
+
+printf "%-10s %-15s %-10s %-12s %-20s %-7s %s\n" "KEY" "STATUS" "PRIORITY" "TYPE" "ASSIGNEE" "SP" "SUMMARY"
+printf "%-10s %-15s %-10s %-12s %-20s %-7s %s\n" "---" "------" "--------" "----" "--------" "--" "-------"
+
+echo "$body" | jq -r '.issues[] | [
+  .key,
+  .fields.status.name,
+  .fields.priority.name,
+  .fields.issuetype.name,
+  (.fields.assignee.displayName // "Unassigned"),
+  (if .fields.customfield_10016 then ("SP:" + (.fields.customfield_10016 | tostring)) else "SP:--" end),
+  .fields.summary
+] | @tsv' | while IFS=$'\t' read -r key status priority type assignee sp summary; do
+  printf "%-10s %-15s %-10s %-12s %-20s %-7s %s\n" "$key" "$status" "$priority" "$type" "$assignee" "$sp" "$summary"
+done

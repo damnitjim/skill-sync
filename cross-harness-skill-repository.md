@@ -1,5 +1,7 @@
 # Building and Distributing a Cross-Harness "Skills" Repository for Claude Code, Codex, Cursor, and Pi Agent
 
+> **Superseded for product decisions:** [ADR-0001](docs/adr/0001-sync-only-distribution.md) chose **Sync-only** distribution (no Claude Marketplace). This document remains as background research; treat Marketplace-hybrid recommendations below as historical.
+
 ## TL;DR
 - **Use a hybrid model.** Adopt the portable **Agent Skills** standard (`SKILL.md` = YAML frontmatter + markdown, optional `scripts/`/`references/`/`assets/`) as your single source of truth in one private Git repo, then serve Claude Code users through its **native plugin marketplace** (`.claude-plugin/marketplace.json`) and serve Codex, Cursor, and Pi Agent users through a thin **custom sync/install CLI** — because all four harnesses now natively read the same `SKILL.md` format, the CLI mostly places/symlinks folders rather than transforming them.
 - **The format war is largely over in your favor.** Anthropic's Agent Skills was published as an open standard at agentskills.io on Dec 18, 2025 (the feature first launched Oct 16, 2025), and by March 2026 had been adopted by 32 tools including Claude Code, Codex, Cursor, and Pi — so one authored skill runs nearly everywhere. The differences that remain are *where* each tool looks for skills and optional per-tool metadata files, not the core format.

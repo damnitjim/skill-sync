@@ -15,14 +15,11 @@ Your project uses a **single-context** domain docs layout: one unified knowledge
 
 ## CONTEXT.md
 
-The root `CONTEXT.md` is the single source of truth for project knowledge. It should include:
+The root `CONTEXT.md` is the single source of truth for project domain language (Skill, Harness, Version, Lock File, Adopt, Sync, etc.). Companion how-to docs:
 
-- **Overview**: what this project does, who uses it, key goals
-- **Architecture**: system design, major components, data flow
-- **Tech stack**: languages, frameworks, major dependencies
-- **Conventions**: naming, patterns, code style
-- **How to run**: setup, dev environment, common commands
-- **Key files**: brief map of important directories and modules
+- [README.md](../../README.md) — install / day-two commands
+- [skills-sync/README.md](../../skills-sync/README.md) — placement map, CLI, CI
+- [docs/catalog/index.md](../catalog/index.md) — Skill catalog + install snippets
 
 Format: plain markdown, no special syntax required.
 

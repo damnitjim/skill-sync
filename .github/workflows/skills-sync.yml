@@ -37,6 +37,19 @@ jobs:
           name: lcov
           path: skills-sync/lcov.info
 
+  validate-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build skills-sync
+        run: cargo build --release -p skills-sync --bin skills-sync
+        working-directory: skills-sync
+      - name: Validate Lock File pins
+        run: ./skills-sync/target/release/skills-sync validate-lock --library .
+
   release-tags:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest

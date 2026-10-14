@@ -2,8 +2,85 @@
 
 mod support;
 
-use skills_sync::release::{detect_version_bumps, proposed_tags, validate_tag_frontmatter};
+use std::fs;
+
+use skills_sync::release::{
+    detect_version_bumps, proposed_tags, validate_lock_tags, validate_tag_frontmatter,
+};
 use support::{SkillSpec, TestEnv};
+
+#[test]
+fn validate_lock_tags_accepts_existing_tag() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# v1\n",
+    }]);
+    env.tag_skill("jira", "1.0.0");
+    env.write_lock(&[("jira", "1.0.0")]);
+    // Lock is written to library-src and clone; ensure clone has lock + tags
+    env.ensure_clone();
+    fs::write(
+        env.paths().library_clone.join("skills.lock"),
+        "[skills]\njira = \"1.0.0\"\n",
+    )
+    .unwrap();
+
+    validate_lock_tags(&env.paths().library_clone).expect("lock tags valid");
+}
+
+#[test]
+fn validate_lock_tags_accepts_head_frontmatter_when_tag_pending() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.1.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# v1.1\n",
+    }]);
+    // No tag yet; lock matches HEAD frontmatter (PR before release-tags runs)
+    fs::write(
+        env.paths().library_clone.join("skills.lock"),
+        "[skills]\njira = \"1.1.0\"\n",
+    )
+    .unwrap();
+
+    validate_lock_tags(&env.paths().library_clone).expect("pending tag ok when HEAD matches");
+}
+
+#[test]
+fn validate_lock_tags_rejects_pin_with_neither_tag_nor_head_match() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# v1\n",
+    }]);
+    env.tag_skill("jira", "1.0.0");
+    fs::write(
+        env.paths().library_clone.join("skills.lock"),
+        "[skills]\njira = \"9.9.9\"\n",
+    )
+    .unwrap();
+
+    let err = validate_lock_tags(&env.paths().library_clone).expect_err("bad pin");
+    assert!(
+        err.to_string().contains("jira@9.9.9") || err.to_string().contains("9.9.9"),
+        "{err}"
+    );
+}
 
 #[test]
 fn detect_version_bump_proposes_name_at_semver_tag() {

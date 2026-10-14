@@ -29,6 +29,16 @@ pub fn generate(library_root: &Path, out_dir: &Path) -> Result<(), Error> {
     entries.sort_by(|a, b| a.0.name.cmp(&b.0.name));
 
     let mut index = String::from("# Skill Catalog\n\n");
+    index.push_str(
+        "Skills on `main` (latest frontmatter Versions). Team pins may lag — see [`skills.lock`](../../skills.lock).\n\n",
+    );
+    index.push_str("## Install\n\n");
+    index.push_str("```bash\n./scripts/bootstrap-skills-sync.sh\n");
+    index.push_str("# or per Skill (see each page):\n");
+    index.push_str(
+        "skills-sync init --skills <name> --harnesses claude-code,cursor && skills-sync sync\n```\n\n",
+    );
+    index.push_str("Details: [skills-sync/README.md](../../skills-sync/README.md).\n\n");
     index.push_str("| Skill | Version | Description | Status |\n");
     index.push_str("|-------|---------|-------------|--------|\n");
     for (meta, has_migration) in &entries {
@@ -67,6 +77,9 @@ pub fn generate(library_root: &Path, out_dir: &Path) -> Result<(), Error> {
                 meta.dependencies.join(", ")
             ));
         }
+        page.push_str("## Install\n\n```bash\nskills-sync init --skills ");
+        page.push_str(&meta.name);
+        page.push_str(" --harnesses claude-code,cursor && skills-sync sync\n```\n");
         fs::write(skill_dir.join("index.md"), page)?;
     }
 

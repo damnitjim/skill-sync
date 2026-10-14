@@ -46,6 +46,14 @@ impl PersonalConfig {
             other => Err(Error::msg(format!("invalid placement_scope: {other}"))),
         }
     }
+
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

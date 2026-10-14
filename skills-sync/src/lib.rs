@@ -12,8 +12,8 @@ mod sync_ops;
 
 pub use error::Error;
 pub use sync_ops::{
-    AdoptReport, Harness, OverridePin, PlacementKind, PlacementRecord, PlacementScope, SkillStatus,
-    StatusReport, SyncPaths, SyncReport, WantedSkill,
+    AdoptReport, Harness, ListedPlacement, ListedSkill, MigrationNotice, OverridePin, PlacementKind,
+    PlacementRecord, PlacementScope, SkillStatus, StatusReport, SyncPaths, SyncReport, WantedSkill,
 };
 
 use std::path::Path;
@@ -58,6 +58,14 @@ impl SkillsSync {
 
     pub fn set_override(&self, skill: &str, version: &str) -> Result<(), Error> {
         self.inner.set_override(skill, version)
+    }
+
+    pub fn list(&self) -> Result<Vec<ListedSkill>, Error> {
+        self.inner.list()
+    }
+
+    pub fn remove(&self, skill: &str) -> Result<(), Error> {
+        self.inner.remove(skill)
     }
 
     pub fn generate_catalog(&self, out_dir: &Path) -> Result<(), Error> {

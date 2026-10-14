@@ -1,0 +1,63 @@
+name: skills-sync-binaries
+
+# Publish bootstrap binaries for scripts/bootstrap-skills-sync.sh
+# (skills-sync-<os>-<arch> on the GitHub Release for tag skills-sync-v*).
+
+on:
+  push:
+    tags:
+      - "skills-sync-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: skills-sync-linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            asset: skills-sync-darwin-aarch64
+            target: aarch64-apple-darwin
+          - os: macos-13
+            asset: skills-sync-darwin-x86_64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release -p skills-sync --bin skills-sync --target ${{ matrix.target }}
+        working-directory: skills-sync
+      - name: Stage asset
+        run: |
+          src="skills-sync/target/${{ matrix.target }}/release/skills-sync"
+          cp "$src" "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/skills-sync-v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

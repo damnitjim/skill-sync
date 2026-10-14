@@ -7,3 +7,8 @@ Write or review user stories, epics, defects/bugs, and tasks (Jira, DE project) 
 
 **Dependencies:** jira
 
+## Install
+
+```bash
+skills-sync init --skills story-writing --harnesses claude-code,cursor && skills-sync sync
+```

@@ -114,10 +114,19 @@ pub struct SyncReport {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationNotice {
+    pub skill: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AdoptReport {
     pub updated: Vec<String>,
     pub skipped_overrides: Vec<String>,
+    pub migrations: Vec<MigrationNotice>,
     pub sync: SyncReport,
 }
 
@@ -144,6 +153,19 @@ pub struct StatusReport {
     pub overrides: Vec<OverridePin>,
     pub harnesses: Vec<String>,
     pub placement_scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedPlacement {
+    pub harness: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSkill {
+    pub name: String,
+    pub version: String,
+    pub placements: Vec<ListedPlacement>,
 }
 
 pub struct SkillsSyncInner {
@@ -213,6 +235,26 @@ impl SkillsSyncInner {
                     ));
                 }
             }
+
+            // Canonical store first; non-Codex harnesses link to it.
+            let canonical_parent = place::canonical_skills_dir(
+                &self.paths.home_dir,
+                &self.paths.project_dir,
+                scope,
+            );
+            let (canonical_path, _canonical_kind, canonical_warn) = place::place_skill(
+                &cached,
+                &canonical_parent,
+                &skill.name,
+                self.paths.force_copy,
+            )?;
+            if let Some(w) = canonical_warn {
+                report.warnings.push(format!("{w} (canonical)"));
+            }
+
+            let local_bin = self.paths.home_dir.join(".local").join("bin");
+            place::link_skill_bins(&canonical_path, &local_bin)?;
+
             for harness in &harnesses {
                 let parent = place::harness_skills_dir(
                     &self.paths.home_dir,
@@ -220,19 +262,31 @@ impl SkillsSyncInner {
                     *harness,
                     scope,
                 );
-                let (_path, kind, warn) = place::place_skill(
-                    &cached,
-                    &parent,
-                    &skill.name,
-                    self.paths.force_copy,
-                )?;
+                let (path, kind, warn) = if place::harness_is_canonical(*harness) {
+                    (
+                        canonical_path.clone(),
+                        if self.paths.force_copy {
+                            PlacementKind::Copy
+                        } else {
+                            PlacementKind::Symlink
+                        },
+                        None,
+                    )
+                } else {
+                    place::place_skill(
+                        &canonical_path,
+                        &parent,
+                        &skill.name,
+                        self.paths.force_copy,
+                    )?
+                };
                 if let Some(w) = warn {
                     report.warnings.push(format!("{} ({})", w, harness.as_str()));
                 }
                 report.placements.push(PlacementRecord {
                     skill: skill.name.clone(),
                     harness: harness.as_str().to_string(),
-                    path: parent.join(&skill.name),
+                    path,
                     kind,
                 });
             }
@@ -244,16 +298,54 @@ impl SkillsSyncInner {
         let lock = LockFile::load(&self.paths.lock_path())?;
         let personal = PersonalConfig::load(&self.paths.personal_path())?;
         let overrides = OverridesFile::load(&self.paths.overrides_path())?;
+        let scope = personal.placement_scope()?;
 
         let mut skipped = Vec::new();
         let mut updated = Vec::new();
+        let mut migrations = Vec::new();
         for name in &personal.skills {
             if overrides.overrides.contains_key(name) {
                 skipped.push(name.clone());
                 continue;
             }
-            if lock.skills.contains_key(name) {
-                updated.push(name.clone());
+            let Some(to_version) = lock.skills.get(name) else {
+                continue;
+            };
+            updated.push(name.clone());
+
+            let installed_md = place::canonical_skills_dir(
+                &self.paths.home_dir,
+                &self.paths.project_dir,
+                scope,
+            )
+            .join(name)
+            .join("SKILL.md");
+            let from_version = if installed_md.exists() {
+                skill_meta::parse_skill_md(&installed_md)
+                    .ok()
+                    .map(|m| m.version)
+            } else {
+                None
+            };
+            if let Some(from) = from_version {
+                if is_major_bump(&from, to_version) {
+                    // Peek at the target Version's migration docs before Sync replaces placement.
+                    if let Ok(cached) = git_cache::extract_skill_at_tag(
+                        &self.paths.library_clone,
+                        &self.paths.cache_dir,
+                        name,
+                        to_version,
+                    ) {
+                        if let Some(summary) = migration_summary(&cached) {
+                            migrations.push(MigrationNotice {
+                                skill: name.clone(),
+                                from_version: from,
+                                to_version: to_version.clone(),
+                                summary,
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -261,6 +353,7 @@ impl SkillsSyncInner {
         Ok(AdoptReport {
             updated,
             skipped_overrides: skipped,
+            migrations,
             sync,
         })
     }
@@ -352,4 +445,133 @@ impl SkillsSyncInner {
         o.save(&self.paths.overrides_path())?;
         Ok(())
     }
+
+    pub fn list(&self) -> Result<Vec<ListedSkill>, Error> {
+        let personal = PersonalConfig::load(&self.paths.personal_path())?;
+        let scope = personal.placement_scope()?;
+        let harnesses = personal.harnesses()?;
+        let wanted = self.resolve_wanted()?;
+        let mut listed = Vec::new();
+
+        for skill in &wanted {
+            let mut placements = Vec::new();
+            for harness in &harnesses {
+                let path = place::harness_skills_dir(
+                    &self.paths.home_dir,
+                    &self.paths.project_dir,
+                    *harness,
+                    scope,
+                )
+                .join(&skill.name);
+                if path.exists() || path.symlink_metadata().is_ok() {
+                    placements.push(ListedPlacement {
+                        harness: harness.as_str().to_string(),
+                        path,
+                    });
+                }
+            }
+
+            let version = {
+                let skill_md = place::canonical_skills_dir(
+                    &self.paths.home_dir,
+                    &self.paths.project_dir,
+                    scope,
+                )
+                .join(&skill.name)
+                .join("SKILL.md");
+                if skill_md.exists() {
+                    skill_meta::parse_skill_md(&skill_md)
+                        .map(|m| m.version)
+                        .unwrap_or_else(|_| skill.version.clone())
+                } else {
+                    skill.version.clone()
+                }
+            };
+
+            if !placements.is_empty() {
+                listed.push(ListedSkill {
+                    name: skill.name.clone(),
+                    version,
+                    placements,
+                });
+            }
+        }
+        Ok(listed)
+    }
+
+    pub fn remove(&self, skill: &str) -> Result<(), Error> {
+        let personal = PersonalConfig::load(&self.paths.personal_path())?;
+        let scope = personal.placement_scope()?;
+        let harnesses = personal.harnesses()?;
+        let local_bin = self.paths.home_dir.join(".local").join("bin");
+
+        let canonical = place::canonical_skills_dir(
+            &self.paths.home_dir,
+            &self.paths.project_dir,
+            scope,
+        )
+        .join(skill);
+
+        // Unlink bins while the canonical tree (or its target) still exists.
+        if canonical.exists() || canonical.symlink_metadata().is_ok() {
+            place::unlink_skill_bins(&canonical, &local_bin)?;
+        }
+
+        for harness in &harnesses {
+            if place::harness_is_canonical(*harness) {
+                continue;
+            }
+            let dest = place::harness_skills_dir(
+                &self.paths.home_dir,
+                &self.paths.project_dir,
+                *harness,
+                scope,
+            )
+            .join(skill);
+            place::remove_path(&dest)?;
+        }
+        place::remove_path(&canonical)?;
+
+        let mut personal = personal;
+        personal.skills.retain(|s| s != skill);
+        personal.save(&self.paths.personal_path())?;
+
+        let mut overrides = OverridesFile::load(&self.paths.overrides_path())?;
+        overrides.overrides.remove(skill);
+        overrides.save(&self.paths.overrides_path())?;
+
+        Ok(())
+    }
+}
+
+fn is_major_bump(from: &str, to: &str) -> bool {
+    let Ok(from_v) = semver::Version::parse(from) else {
+        return false;
+    };
+    let Ok(to_v) = semver::Version::parse(to) else {
+        return false;
+    };
+    to_v.major > from_v.major
+}
+
+fn migration_summary(skill_dir: &std::path::Path) -> Option<String> {
+    let migration_md = skill_dir.join("MIGRATION.md");
+    if migration_md.exists() {
+        return std::fs::read_to_string(migration_md).ok().map(|s| {
+            s.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .unwrap_or("")
+                .to_string()
+        }).filter(|s| !s.is_empty());
+    }
+    let skill_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).ok()?;
+    let idx = skill_md.find("## Migration")?;
+    let after = &skill_md[idx + "## Migration".len()..];
+    let section = after.split("\n## ").next().unwrap_or(after);
+    section
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|s| s.to_string())
 }

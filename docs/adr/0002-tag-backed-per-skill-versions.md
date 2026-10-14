@@ -2,7 +2,7 @@
 
 **Status:** accepted
 
-Each Skill Version is semver in `SKILL.md` frontmatter plus an immutable git tag `name@semver`. `main` holds only the latest tree at `skills/<name>/`. Sync path-extracts `skills/<name>/` at the tagged commit into a local cache. CI creates the tag on merge to `main` when that Skill’s `version:` bumps.
+Each Skill Version is semver in `SKILL.md` frontmatter plus an immutable git tag `name@semver`. `main` holds only the latest tree at `skills/<name>/`. Sync path-extracts `skills/<name>/` at the tagged commit into a local cache, then places that tree into the canonical `.agents/skills` store (and Harness links). CI creates the tag on merge to `main` when that Skill’s `version:` bumps. Lock File pins are validated in CI against existing tags or matching HEAD frontmatter.
 
 **Considered options:**
 - Repo-wide tags — cannot pin Skills to different Versions independently

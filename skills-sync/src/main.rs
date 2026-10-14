@@ -23,6 +23,18 @@ enum Commands {
     Adopt,
     /// Show status including Overrides and Deprecation
     Status,
+    /// List installed Skills and Harness paths
+    List,
+    /// Unlink a Skill from Harnesses, bins, and personal config
+    Remove {
+        skill: String,
+    },
+    /// Validate Lock File pins against git tags (or HEAD frontmatter)
+    ValidateLock {
+        /// Library root containing skills.lock (defaults to XDG cache clone)
+        #[arg(long)]
+        library: Option<PathBuf>,
+    },
     /// Interactive TUI
     Tui,
     /// First-run personal setup
@@ -89,7 +101,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !report.updated.is_empty() {
                 println!("adopted: {}", report.updated.join(", "));
             }
+            for m in &report.migrations {
+                println!(
+                    "migration {} {} → {}: {}",
+                    m.skill, m.from_version, m.to_version, m.summary
+                );
+            }
             print_sync(&report.sync);
+        }
+        Commands::List => {
+            for skill in app.list()? {
+                println!("{}@{}", skill.name, skill.version);
+                for p in &skill.placements {
+                    println!("  {} -> {}", p.harness, p.path.display());
+                }
+            }
+        }
+        Commands::Remove { skill } => {
+            app.remove(&skill)?;
+            println!("removed {skill}");
+        }
+        Commands::ValidateLock { library } => {
+            let lib = library.unwrap_or_else(|| app.paths().library_clone.clone());
+            skills_sync::release::validate_lock_tags(&lib)?;
+            println!("Lock File pins OK ({})", lib.display());
         }
         Commands::Status => {
             let status = app.status()?;

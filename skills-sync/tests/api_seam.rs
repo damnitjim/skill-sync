@@ -66,6 +66,188 @@ fn resolve_only_includes_personally_enabled_skills() {
 }
 
 #[test]
+fn list_reports_installed_skills_with_versions_and_harness_paths() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# jira\n",
+    }]);
+    env.tag_skill("jira", "1.0.0");
+    env.write_lock(&[("jira", "1.0.0")]);
+    env.write_personal(
+        &["jira"],
+        &[Harness::ClaudeCode, Harness::Cursor],
+        PlacementScope::User,
+    );
+    env.app().sync().expect("sync");
+
+    let listed = env.app().list().expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "jira");
+    assert_eq!(listed[0].version, "1.0.0");
+    assert!(
+        listed[0]
+            .placements
+            .iter()
+            .any(|p| p.harness == "claude-code" && p.path.exists()),
+        "claude placement missing: {:?}",
+        listed[0].placements
+    );
+    assert!(
+        listed[0]
+            .placements
+            .iter()
+            .any(|p| p.harness == "cursor" && p.path.exists()),
+        "cursor placement missing: {:?}",
+        listed[0].placements
+    );
+}
+
+#[test]
+fn remove_unlinks_placements_bins_and_disables_skill() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# jira\n",
+    }]);
+    let bin_dir = env.library_src().join("skills/jira/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("jira-mine"), "#!/usr/bin/env bash\necho mine\n").unwrap();
+    env.commit_all("add bin");
+    env.tag_skill("jira", "1.0.0");
+    env.write_lock(&[("jira", "1.0.0")]);
+    env.write_personal(
+        &["jira"],
+        &[Harness::ClaudeCode, Harness::Cursor],
+        PlacementScope::User,
+    );
+    env.app().sync().expect("sync");
+    assert!(env.claude_user_skill("jira").exists());
+    assert!(env.codex_user_skill("jira").exists());
+    assert!(env.cursor_user_skill("jira").exists());
+    assert!(env.paths().home_dir.join(".local/bin/jira-mine").exists());
+
+    env.app().remove("jira").expect("remove");
+
+    assert!(
+        !env.claude_user_skill("jira").exists(),
+        "claude placement should be gone"
+    );
+    assert!(
+        !env.cursor_user_skill("jira").exists(),
+        "cursor placement should be gone"
+    );
+    assert!(
+        !env.codex_user_skill("jira").exists(),
+        "canonical placement should be gone"
+    );
+    assert!(
+        !env.paths().home_dir.join(".local/bin/jira-mine").exists(),
+        "bin link should be gone"
+    );
+    let wanted = env.app().resolve_wanted().expect("resolve after remove");
+    assert!(
+        wanted.iter().all(|w| w.name != "jira"),
+        "jira should be removed from personal selection: {wanted:?}"
+    );
+}
+
+#[test]
+fn sync_links_skill_bin_scripts_onto_user_path() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira helpers",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# Jira\n",
+    }]);
+    let bin_dir = env.library_src().join("skills/jira/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let script = bin_dir.join("jira-mine");
+    fs::write(&script, "#!/usr/bin/env bash\necho mine\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    env.commit_all("add jira-mine bin");
+    env.tag_skill("jira", "1.0.0");
+    env.write_lock(&[("jira", "1.0.0")]);
+    env.write_personal(&["jira"], &[Harness::ClaudeCode], PlacementScope::User);
+
+    env.app().sync().expect("sync");
+
+    let on_path = env.paths().home_dir.join(".local/bin/jira-mine");
+    assert!(
+        on_path.exists(),
+        "expected bin link at {}",
+        on_path.display()
+    );
+    let meta = fs::symlink_metadata(&on_path).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "bin should be symlinked onto PATH"
+    );
+    let body = fs::read_to_string(&on_path).unwrap();
+    assert!(body.contains("echo mine"), "{body}");
+}
+
+#[test]
+fn sync_places_canonical_under_agents_skills_then_links_claude() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira helpers",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# Jira v1\n",
+    }]);
+    env.tag_skill("jira", "1.0.0");
+    env.write_lock(&[("jira", "1.0.0")]);
+    env.write_personal(&["jira"], &[Harness::ClaudeCode], PlacementScope::User);
+
+    let report = env.app().sync().expect("sync");
+    assert_eq!(report.placements.len(), 1);
+    assert_eq!(report.placements[0].harness, "claude-code");
+    assert!(report.warnings.is_empty());
+
+    let canonical = env.codex_user_skill("jira");
+    assert!(
+        canonical.exists(),
+        "canonical store missing at {}",
+        canonical.display()
+    );
+    let skill_md = fs::read_to_string(canonical.join("SKILL.md")).expect("canonical SKILL.md");
+    assert!(skill_md.contains("Jira v1"));
+
+    let claude = env.claude_user_skill("jira");
+    assert!(claude.exists(), "claude link missing at {}", claude.display());
+    let meta = fs::symlink_metadata(&claude).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "claude placement should symlink to canonical"
+    );
+    let resolved = fs::canonicalize(&claude).unwrap();
+    let canonical_resolved = fs::canonicalize(&canonical).unwrap();
+    assert_eq!(resolved, canonical_resolved);
+}
+
+#[test]
 fn sync_extracts_tagged_skill_and_symlinks_into_claude_user_scope() {
     let env = TestEnv::new();
     env.init_library_repo(&[
@@ -266,6 +448,49 @@ fn status_flags_deprecated_skills() {
 }
 
 #[test]
+fn adopt_surfaces_migration_docs_on_major_version_bump() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# v1\n",
+    }]);
+    env.tag_skill("jira", "1.0.0");
+    env.write_lock(&[("jira", "1.0.0")]);
+    env.write_personal(&["jira"], &[Harness::ClaudeCode], PlacementScope::User);
+    env.app().sync().expect("sync v1");
+
+    env.update_skill(SkillSpec {
+        name: "jira",
+        version: "2.0.0",
+        description: "Jira",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# v2\n\n## Migration\n\nRename jira-old to jira-new.\n",
+    });
+    env.tag_skill("jira", "2.0.0");
+    env.write_lock(&[("jira", "2.0.0")]);
+
+    let report = env.app().adopt().expect("adopt");
+    assert!(
+        report
+            .migrations
+            .iter()
+            .any(|m| m.skill == "jira"
+                && m.from_version == "1.0.0"
+                && m.to_version == "2.0.0"
+                && m.summary.contains("Rename jira-old")),
+        "expected migration notice, got: {:?}",
+        report.migrations
+    );
+}
+
+#[test]
 fn adopt_updates_installed_to_lock_but_skips_overrides() {
     let env = TestEnv::new();
     env.init_library_repo(&[SkillSpec {
@@ -420,6 +645,33 @@ fn clear_override_removes_personal_pin() {
     let wanted = env.app().resolve_wanted().unwrap();
     assert_eq!(wanted[0].version, "1.0.0");
     assert!(!wanted[0].from_override);
+}
+
+#[test]
+fn generate_catalog_includes_per_skill_install_snippet() {
+    let env = TestEnv::new();
+    env.init_library_repo(&[SkillSpec {
+        name: "jira",
+        version: "1.0.0",
+        description: "Jira helpers",
+        dependencies: &[],
+        deprecated: false,
+        successor: None,
+        body: "# jira\n",
+    }]);
+    env.ensure_clone();
+    let out = env.paths().cache_dir.join("catalog-install");
+    env.app().generate_catalog(&out).expect("catalog");
+
+    let page = fs::read_to_string(out.join("jira/index.md")).expect("jira page");
+    assert!(
+        page.contains("skills-sync init") && page.contains("--skills jira"),
+        "expected install snippet, got:\n{page}"
+    );
+    assert!(
+        page.contains("skills-sync sync"),
+        "expected sync step in install snippet:\n{page}"
+    );
 }
 
 #[test]

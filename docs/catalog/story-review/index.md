@@ -7,3 +7,8 @@ Score and give teaching feedback on user stories, epics, and defects (Jira, DE p
 
 **Dependencies:** story-writing
 
+## Install
+
+```bash
+skills-sync init --skills story-review --harnesses claude-code,cursor && skills-sync sync
+```

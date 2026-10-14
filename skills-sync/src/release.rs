@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::lock::LockFile;
 use crate::skill_meta;
 use crate::Error;
 
@@ -56,6 +57,40 @@ pub fn validate_tag_frontmatter(repo: &Path, name: &str, version: &str) -> Resul
         )));
     }
     Ok(())
+}
+
+/// Ensure every Lock File pin has either an existing `name@version` tag, or HEAD
+/// frontmatter already at that Version (tag pending on merge).
+pub fn validate_lock_tags(repo: &Path) -> Result<(), Error> {
+    let lock = LockFile::load(&repo.join("skills.lock"))?;
+    let mut missing = Vec::new();
+    for (name, version) in &lock.skills {
+        let tag = format!("{name}@{version}");
+        if tag_exists(repo, &tag) {
+            continue;
+        }
+        match version_at(repo, "HEAD", name) {
+            Ok(head_ver) if &head_ver == version => continue,
+            _ => missing.push(tag),
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::msg(format!(
+            "Lock File pins missing tags (and HEAD frontmatter mismatch): {}",
+            missing.join(", ")
+        )))
+    }
+}
+
+fn tag_exists(repo: &Path, tag: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/tags/{tag}")])
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn version_at(repo: &Path, rev: &str, name: &str) -> Result<String, Error> {

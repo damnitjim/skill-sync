@@ -1,5 +1,17 @@
 # Skill Catalog
 
+Skills on `main` (latest frontmatter Versions). Team pins may lag — see [`skills.lock`](../../skills.lock).
+
+## Install
+
+```bash
+./scripts/bootstrap-skills-sync.sh
+# or per Skill (see each page):
+skills-sync init --skills <name> --harnesses claude-code,cursor && skills-sync sync
+```
+
+Details: [skills-sync/README.md](../../skills-sync/README.md).
+
 | Skill | Version | Description | Status |
 |-------|---------|-------------|--------|
 | [confluence](confluence/) | 1.0.0 | Read, search, and publish Confluence wiki pages for Sophos using curl+jq shell scripts. Use this when working with Confluence pages, wiki documentation, spaces, or knowledge base content, or when publishing a report/page to Confluence. | active |

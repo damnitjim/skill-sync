@@ -7,7 +7,7 @@ version: 1.0.0
 # Jira Integration
 
 Shell scripts for managing Jira issues via the REST API v3. They live in this
-skill's `bin/` folder and are symlinked into `~/.local/bin/` by `skills sync`,
+skill's `bin/` folder and are symlinked into `~/.local/bin/` by `skills-sync sync`,
 so they resolve by bare name on your `$PATH`.
 
 **Endpoint:** `https://sophos.atlassian.net`

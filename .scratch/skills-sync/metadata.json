@@ -1,6 +1,6 @@
 {
   "labels": ["ready-for-agent"],
-  "status": "open",
+  "status": "closed",
   "created": "2026-09-13",
   "title": "skills-sync: cross-harness Skill distribution"
 }

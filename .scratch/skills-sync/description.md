@@ -123,3 +123,14 @@ Ship **skills-sync**: a Rust CLI + full TUI that Syncs Skills from this library 
 - Glossary: `CONTEXT.md`. Architecture decisions: `docs/adr/0001`–`0004`. Background research: `cross-harness-skill-repository.md` (Marketplace sections superseded by ADR-0001).
 - Suggested implementation order under TDD: (1) Lock + resolve desired Versions with Overrides, (2) git path-extract into cache, (3) placement symlink/copy + one Placement Scope, (4) Adopt, (5) Dependency/Deprecation warnings, (6) CLI, (7) TUI, (8) Release helper + CI, (9) Catalog generator, (10) bootstrap script + Release binaries.
 - Issue tracker path: `.scratch/skills-sync/`.
+
+## Shipped delta (post-close)
+
+Keep this historical spec for the original user stories; live behavior is documented in `CONTEXT.md`, `README.md`, and `skills-sync/README.md`. Notable deltas vs the original write-up:
+
+- Bootstrap defaults to **`sync`**, not TUI first-run (TUI via `--tui` / `SKILLS_SYNC_TUI=1`).
+- Placement is **canonical `.agents/skills`**, then Harness symlinks (Codex uses the canonical path).
+- Skill **`bin/`** scripts link into `~/.local/bin`.
+- CLI includes **`list`**, **`remove`**, **`validate-lock`**; Adopt surfaces **Migration Docs** on major bumps.
+- Catalog pages include per-Skill install snippets; CI validates Lock File pins and can publish `skills-sync-v*` binaries.
+- `placement_scope` is **one scope per Sync run** (global in `personal.toml`), not independently per Harness.

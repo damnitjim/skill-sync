@@ -7,8 +7,8 @@ version: 1.0.0
 # Confluence Integration
 
 Shell scripts for reading Confluence wiki pages via the REST API. They live in
-this skill's `bin/` folder and are symlinked into `~/.local/bin/` by `skills
-sync`, so they resolve by bare name on your `$PATH`.
+this skill's `bin/` folder and are symlinked into `~/.local/bin/` by
+`skills-sync sync`, so they resolve by bare name on your `$PATH`.
 
 **Endpoint:** `https://sophos.atlassian.net/wiki`
 **Auth:** Basic auth using `JIRA_API_TOKEN` env var (same Atlassian token as Jira)

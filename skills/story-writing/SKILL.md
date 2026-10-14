@@ -9,7 +9,7 @@ description: >
   refining, or reviewing Jira issues/requirements, writing a story/epic/task/bug,
   splitting an oversized story, or filing a defect. Pairs with the `jira` skill for
   ticket mechanics.
-version: 1.0.0
+version: 1.1.0
 dependencies:
   - jira
 allowed-tools: Read
@@ -21,6 +21,9 @@ How we write and refine work in the DE Jira project: epics, feature stories,
 technical/enabler work, and defects. Framework-agnostic (widely-accepted agile/Scrum
 practice), optimized for small, vertically-sliced, testable increments traceable to
 product requirements (F-numbers). Use the `jira` skill for the actual tickets.
+
+**What's new in 1.1.0:** worked “good vs weak *so that*” examples under the feature
+story format (§2).
 
 Two deep references load on demand — read them when the task calls for them:
 
@@ -67,6 +70,19 @@ So that [benefit / value]
   (admin, analyst, case manager, on-call) — avoid "As a user…" as a lazy default.
 - **Don't prescribe the solution** ("…via an autocomplete dropdown"). State the goal;
   leave the how to the team.
+
+### Good vs weak “so that”
+
+Weak *so that* lines restate the capability or name a UI widget. Strong ones name an
+observable benefit for the persona.
+
+| Weak | Better |
+|------|--------|
+| As a case manager / I want to sort cases by priority / **so that I can sort cases** | … / **so that I can triage the highest-risk cases first during my morning review** |
+| As an admin / I want an autocomplete dropdown for assignees / **so that I can pick an assignee from a dropdown** | As an admin / I want to find the right assignee quickly / **so that tickets stop sitting unowned while I scroll a long list** |
+| As an analyst / I want export to CSV / **so that I can export data** | As an analyst / I want to take a filtered case list offline / **so that I can finish a compliance review without staying logged into the tool** |
+
+If the *so that* only repeats the *I want*, rewrite it before calling the story Ready.
 
 ## 3. INVEST — every story should be
 
@@ -193,7 +209,8 @@ expected vs actual, evidence), **severity vs priority** (independent axes), and 
 
 ## Review checklist (before "Ready")
 
-- [ ] `As a / I want / So that` present, user-centric, with a real "so that"; value stated.
+- [ ] `As a / I want / So that` present, user-centric, with a real "so that" that states
+      value (not a restatement of the capability — see §2 examples).
 - [ ] Persona is a user/role, not a system component (unless a deliberate enabler/NFR).
 - [ ] Passes INVEST — especially **Small** (fits comfortably in a sprint) and **Independent**.
 - [ ] **Vertical slice** — not a horizontal DB/API/UI fragment or a disguised task.
@@ -211,3 +228,14 @@ paragraph (ADF). For a structured description (headings, the story block, Given/
 bullets), POST a proper ADF `description` via `curl .../rest/api/3/issue` instead, or
 create with a short summary and add the structured body in a follow-up. Default project:
 `DE`.
+
+## Changelog
+
+### 1.1.0
+
+- Added **Good vs weak “so that”** worked examples under the feature story format.
+- Review checklist now points authors at those examples when validating value statements.
+
+### 1.0.0
+
+- Initial Release of the DE story-writing guidelines.

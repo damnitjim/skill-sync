@@ -45,3 +45,7 @@ Optional TUI on bootstrap: `SKILLS_SYNC_TUI=1 ./scripts/bootstrap-skills-sync.sh
 Env overrides: `SKILL_LIBRARY_REPO`, `SKILLS_SYNC_RELEASE_BASE` (defaults to this repo’s GitHub Releases when `origin` is a GitHub remote).
 
 Details: [skills-sync/README.md](skills-sync/README.md). Domain language: [CONTEXT.md](CONTEXT.md). Decisions: [docs/adr/](docs/adr/).
+
+## Contributing
+
+Adding or versioning Skills: [CONTRIBUTING.md](CONTRIBUTING.md).

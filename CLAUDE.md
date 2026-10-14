@@ -17,3 +17,7 @@ Use `CONTEXT.md` vocabulary (Skill, Harness, Version, Lock File, Adopt, Override
 ### Install / Sync tooling
 
 End-user and maintainer flows for placing Skills: [README.md](README.md) and [skills-sync/README.md](skills-sync/README.md). Bootstrap: `scripts/bootstrap-skills-sync.sh`. Behavior is covered at the application API seam under TDD (`skills-sync/tests/`).
+
+### Contributing Skills
+
+Authoring, semver, Lock File, and PR checklist: [CONTRIBUTING.md](CONTRIBUTING.md).

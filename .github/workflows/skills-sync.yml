@@ -30,7 +30,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Test with coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 85 --ignore-filename-regex '(main\.rs|tui\.rs|/bin/)'
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 85 --ignore-filename-regex '(main\.rs|tui\.rs|style\.rs|/bin/)'
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:

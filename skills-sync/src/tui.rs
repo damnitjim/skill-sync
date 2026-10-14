@@ -1,9 +1,16 @@
 use std::io::{self, Write};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::{DefaultTerminal, Frame, layout::{Constraint, Direction, Layout}};
+use ratatui::{
+    DefaultTerminal, Frame,
+    layout::{Constraint, Direction, Layout},
+};
 use skills_sync::{PlacementKind, SkillsSync};
+
+use crate::style;
 
 pub fn run(app: SkillsSync) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::init();
@@ -12,13 +19,23 @@ pub fn run(app: SkillsSync) -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+fn title_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn run_loop(
     terminal: &mut DefaultTerminal,
     app: SkillsSync,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut list_state = ListState::default();
     list_state.select(Some(0));
-    let mut message = String::from("↑↓ move · s sync · a adopt · r refresh · q quit");
+    let mut message = Line::from(vec![Span::styled(
+        "↑↓ move · s sync · a adopt · r refresh · q quit",
+        Style::default().fg(Color::DarkGray),
+    )]);
+    let mut message_style = Style::default().fg(Color::DarkGray);
 
     loop {
         let status = app.status().unwrap_or_default();
@@ -42,67 +59,136 @@ fn run_loop(
             let items: Vec<ListItem> = wanted
                 .iter()
                 .map(|w| {
-                    let mark = if w.from_override { " [ovr]" } else { "" };
-                    ListItem::new(format!("{}@{}{mark}", w.name, w.version))
+                    if w.from_override {
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                format!("{} ", style::icon::OVERRIDE),
+                                Style::default().fg(Color::Magenta),
+                            ),
+                            Span::styled(
+                                format!("{}@{}", w.name, w.version),
+                                Style::default().fg(Color::Magenta),
+                            ),
+                        ]))
+                    } else {
+                        ListItem::new(format!("{}@{}", w.name, w.version))
+                    }
                 })
                 .collect();
             let list = List::new(items)
-                .block(Block::bordered().title("Skills"))
-                .highlight_symbol(">> ");
+                .block(
+                    Block::bordered()
+                        .title(format!("{} Skills", style::icon::SKILL))
+                        .title_style(title_style()),
+                )
+                .highlight_symbol("▶ ")
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
             frame.render_stateful_widget(list, main[0], &mut list_state);
 
             let selected = list_state.selected().and_then(|i| wanted.get(i));
-            let detail = if let Some(w) = selected {
+            let detail_lines = if let Some(w) = selected {
                 let st = status.skills.iter().find(|s| s.name == w.name);
-                let mut text = format!("Skill: {}\nVersion: {}\n", w.name, w.version);
+                let mut lines: Vec<Line> = vec![
+                    labeled("Skill", &w.name),
+                    labeled("Version", &w.version),
+                ];
                 if w.from_override {
-                    text.push_str("Source: Override\n");
+                    lines.push(Line::from(vec![
+                        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("{} Override", style::icon::OVERRIDE),
+                            Style::default().fg(Color::Magenta),
+                        ),
+                    ]));
                 } else {
-                    text.push_str("Source: Lock File\n");
+                    lines.push(Line::from(vec![
+                        Span::styled("Source: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("{} Lock File", style::icon::LOCK)),
+                    ]));
                 }
                 if let Some(s) = st {
-                    text.push_str(&format!("Description: {}\n", s.description));
+                    lines.push(Line::from(vec![
+                        Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(s.description.clone()),
+                    ]));
                     if s.deprecated {
-                        text.push_str("DEPRECATED");
+                        let mut dep = vec![Span::styled(
+                            format!("{} DEPRECATED", style::icon::WARN),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )];
                         if let Some(suc) = &s.successor {
-                            text.push_str(&format!(" → {suc}"));
+                            dep.push(Span::styled(
+                                format!(" → {suc}"),
+                                Style::default().fg(Color::DarkGray),
+                            ));
                         }
-                        text.push('\n');
+                        lines.push(Line::from(dep));
                     }
                 }
-                text.push_str("\nSync preview:\n");
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Sync preview:",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
                 for h in &status.harnesses {
-                    text.push_str(&format!("  → {h}/{}\n", w.name));
+                    lines.push(Line::from(Span::styled(
+                        format!("  → {h}/{}", w.name),
+                        Style::default().fg(Color::Green),
+                    )));
                 }
-                text
+                lines
             } else {
-                "No Skills selected in personal.toml".into()
+                vec![Line::from(Span::styled(
+                    "No Skills selected in personal.toml",
+                    Style::default().fg(Color::DarkGray),
+                ))]
             };
             frame.render_widget(
-                Paragraph::new(detail)
-                    .block(Block::bordered().title("Details"))
+                Paragraph::new(detail_lines)
+                    .block(
+                        Block::bordered()
+                            .title(format!("{} Details", style::icon::LIST))
+                            .title_style(title_style()),
+                    )
                     .wrap(Wrap { trim: true }),
                 main[1],
             );
 
-            let mut ovr = String::from("Overrides: ");
-            if status.overrides.is_empty() {
-                ovr.push_str("(none)");
+            let ovr_line = if status.overrides.is_empty() {
+                Line::from(Span::styled(
+                    format!("{} Overrides: (none)", style::icon::OVERRIDE),
+                    Style::default().fg(Color::DarkGray),
+                ))
             } else {
-                ovr.push_str(
-                    &status
-                        .overrides
-                        .iter()
-                        .map(|o| format!("{}@{}", o.name, o.version))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-            }
+                Line::from(Span::styled(
+                    format!(
+                        "{} Overrides: {}",
+                        style::icon::OVERRIDE,
+                        status
+                            .overrides
+                            .iter()
+                            .map(|o| format!("{}@{}", o.name, o.version))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Style::default().fg(Color::Magenta),
+                ))
+            };
             frame.render_widget(
-                Paragraph::new(ovr).block(Block::bordered().title("Status")),
+                Paragraph::new(ovr_line).block(
+                    Block::bordered()
+                        .title(format!("{} Status", style::icon::STATUS))
+                        .title_style(title_style()),
+                ),
                 layout[1],
             );
-            frame.render_widget(Paragraph::new(message.as_str()), layout[2]);
+            frame.render_widget(Paragraph::new(message.clone()).style(message_style), layout[2]);
         })?;
 
         if event::poll(std::time::Duration::from_millis(200))? {
@@ -123,11 +209,13 @@ fn run_loop(
                     }
                     KeyCode::Char('s') => match app.sync() {
                         Ok(r) => {
-                            message = format!(
-                                "synced {} placement(s), {} warning(s)",
+                            message = Line::from(format!(
+                                "{} synced {} placement(s), {} warning(s)",
+                                style::icon::OK,
                                 r.placements.len(),
                                 r.warnings.len()
-                            );
+                            ));
+                            message_style = Style::default().fg(Color::Green);
                             for p in r.placements {
                                 let k = match p.kind {
                                     PlacementKind::Symlink => "symlink",
@@ -136,20 +224,29 @@ fn run_loop(
                                 let _ = writeln!(io::stderr(), "{} ({k})", p.path.display());
                             }
                         }
-                        Err(e) => message = format!("sync error: {e}"),
+                        Err(e) => {
+                            message = Line::from(format!("{} sync error: {e}", style::icon::ERR));
+                            message_style = Style::default().fg(Color::Red);
+                        }
                     },
                     KeyCode::Char('a') => match app.adopt() {
                         Ok(r) => {
-                            message = format!(
-                                "adopt updated={}, skipped overrides={}",
+                            message = Line::from(format!(
+                                "{} adopt updated={}, skipped overrides={}",
+                                style::icon::OK,
                                 r.updated.len(),
                                 r.skipped_overrides.len()
-                            );
+                            ));
+                            message_style = Style::default().fg(Color::Green);
                         }
-                        Err(e) => message = format!("adopt error: {e}"),
+                        Err(e) => {
+                            message = Line::from(format!("{} adopt error: {e}", style::icon::ERR));
+                            message_style = Style::default().fg(Color::Red);
+                        }
                     },
                     KeyCode::Char('r') => {
-                        message = "refreshed".into();
+                        message = Line::from(format!("{} refreshed", style::icon::CHECK));
+                        message_style = Style::default().fg(Color::Cyan);
                     }
                     _ => {}
                 }
@@ -157,4 +254,11 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+fn labeled<'a>(label: &'a str, value: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
+        Span::raw(value),
+    ])
 }

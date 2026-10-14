@@ -17,6 +17,8 @@ Bootstrap detects `SKILL_LIBRARY_REPO` (or `git remote origin`, or the local che
 Config: `~/.config/skills-sync/` (`personal.toml`, `overrides.toml`)  
 Cache: `~/.cache/skills-sync/` (library clone + version extracts)
 
+CLI/TUI use emoji status icons and ANSI color when stdout is a TTY. Disable with `--no-color`, `NO_COLOR`, or `SKILLS_SYNC_NO_COLOR=1`.
+
 ## Placement
 
 Sync writes a **canonical** skill tree under `.agents/skills/<name>/` (user: `~/.agents/skills`, project: `./.agents/skills`), then symlinks Harness discovery dirs to it:

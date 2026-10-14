@@ -4,11 +4,16 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use skills_sync::{Harness, PlacementScope, SkillsSync, SyncPaths};
 
+mod style;
 mod tui;
 
 #[derive(Parser, Debug)]
 #[command(name = "skills-sync", about = "Sync Agent Skills into Claude Code, Codex, Cursor, and Pi")]
 struct Cli {
+    /// Disable ANSI colors (also honors NO_COLOR)
+    #[arg(long, global = true, env = "SKILLS_SYNC_NO_COLOR")]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -69,7 +74,11 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!(
+                "{} {}",
+                style::error(style::icon::ERR),
+                style::error(format!("error: {e}"))
+            );
             ExitCode::FAILURE
         }
     }
@@ -77,13 +86,22 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    style::init(cli.no_color);
     let app = SkillsSync::with_xdg()?;
 
     match cli.command {
         Commands::Resolve => {
             for w in app.resolve_wanted()? {
-                let marker = if w.from_override { " (override)" } else { "" };
-                println!("{}@{}{marker}", w.name, w.version);
+                if w.from_override {
+                    println!(
+                        "{}@{} {}",
+                        w.name,
+                        w.version,
+                        style::magenta(format!("{} override", style::icon::OVERRIDE))
+                    );
+                } else {
+                    println!("{}@{}", w.name, w.version);
+                }
             }
         }
         Commands::Sync => {
@@ -94,69 +112,69 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = app.adopt()?;
             if !report.skipped_overrides.is_empty() {
                 println!(
-                    "skipped Overrides: {}",
-                    report.skipped_overrides.join(", ")
+                    "{} {}",
+                    style::warn(style::icon::OVERRIDE),
+                    style::warn(format!(
+                        "skipped Overrides: {}",
+                        report.skipped_overrides.join(", ")
+                    ))
                 );
             }
             if !report.updated.is_empty() {
-                println!("adopted: {}", report.updated.join(", "));
+                println!(
+                    "{} {}",
+                    style::success(style::icon::OK),
+                    style::success(format!("adopted: {}", report.updated.join(", ")))
+                );
             }
             for m in &report.migrations {
                 println!(
-                    "migration {} {} → {}: {}",
-                    m.skill, m.from_version, m.to_version, m.summary
+                    "{} {}",
+                    style::blue(style::icon::MIGRATE),
+                    style::blue(format!(
+                        "migration {} {} → {}: {}",
+                        m.skill, m.from_version, m.to_version, m.summary
+                    ))
                 );
             }
             print_sync(&report.sync);
         }
         Commands::List => {
             for skill in app.list()? {
-                println!("{}@{}", skill.name, skill.version);
+                println!(
+                    "{} {}",
+                    style::icon::SKILL,
+                    style::bold(format!("{}@{}", skill.name, skill.version))
+                );
                 for p in &skill.placements {
-                    println!("  {} -> {}", p.harness, p.path.display());
+                    println!(
+                        "  {} {} {}",
+                        style::accent(&p.harness),
+                        style::dim("->"),
+                        style::dim(p.path.display().to_string())
+                    );
                 }
             }
         }
         Commands::Remove { skill } => {
             app.remove(&skill)?;
-            println!("removed {skill}");
+            println!(
+                "{} {}",
+                style::success(style::icon::CHECK),
+                style::success(format!("removed {skill}"))
+            );
         }
         Commands::ValidateLock { library } => {
             let lib = library.unwrap_or_else(|| app.paths().library_clone.clone());
             skills_sync::release::validate_lock_tags(&lib)?;
-            println!("Lock File pins OK ({})", lib.display());
+            println!(
+                "{} {}",
+                style::success(style::icon::LOCK),
+                style::success(format!("Lock File pins OK ({})", lib.display()))
+            );
         }
         Commands::Status => {
-            let status = app.status()?;
-            println!(
-                "placement_scope: {}  harnesses: {}",
-                status.placement_scope,
-                status.harnesses.join(", ")
-            );
-            if !status.overrides.is_empty() {
-                println!("Overrides:");
-                for o in &status.overrides {
-                    println!("  {}@{}", o.name, o.version);
-                }
-            }
-            for s in &status.skills {
-                let dep = if s.deprecated {
-                    format!(
-                        " DEPRECATED{}",
-                        s.successor
-                            .as_ref()
-                            .map(|x| format!(" → {x}"))
-                            .unwrap_or_default()
-                    )
-                } else {
-                    String::new()
-                };
-                let ovr = if s.from_override { " [override]" } else { "" };
-                println!(
-                    "{}: effective {} (lock {}){ovr}{dep}",
-                    s.name, s.effective_version, s.lock_version
-                );
-            }
+            print_status(&app.status()?);
         }
         Commands::Tui => tui::run(app)?,
         Commands::Init {
@@ -165,15 +183,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             scope,
         } => {
             init_personal(app.paths(), &skills, &harnesses, &scope)?;
-            println!("wrote {}", app.paths().config_dir.join("personal.toml").display());
+            println!(
+                "{} {}",
+                style::success(style::icon::CHECK),
+                style::success(format!(
+                    "wrote {}",
+                    app.paths().config_dir.join("personal.toml").display()
+                ))
+            );
         }
         Commands::Override { skill, version } => {
             app.set_override(&skill, &version)?;
-            println!("override {skill}@{version}");
+            println!(
+                "{} {}",
+                style::magenta(style::icon::OVERRIDE),
+                style::magenta(format!("override {skill}@{version}"))
+            );
         }
         Commands::ClearOverride { skill } => {
             app.clear_override(&skill)?;
-            println!("cleared override for {skill}");
+            println!(
+                "{} {}",
+                style::success(style::icon::CHECK),
+                style::success(format!("cleared override for {skill}"))
+            );
         }
         Commands::Catalog { out, library } => {
             if let Some(lib) = library {
@@ -184,22 +217,85 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 app.generate_catalog(&out)?;
             }
-            println!("catalog written to {}", out.display());
+            println!(
+                "{} {}",
+                style::success(style::icon::CHECK),
+                style::success(format!("catalog written to {}", out.display()))
+            );
         }
     }
     Ok(())
 }
 
+fn print_status(status: &skills_sync::StatusReport) {
+    println!(
+        "{} {}  {} {}",
+        style::accent("placement_scope:"),
+        status.placement_scope,
+        style::accent("harnesses:"),
+        status.harnesses.join(", ")
+    );
+    if !status.overrides.is_empty() {
+        println!("{}", style::magenta(format!("{} Overrides:", style::icon::OVERRIDE)));
+        for o in &status.overrides {
+            println!(
+                "  {}",
+                style::magenta(format!("{}@{}", o.name, o.version))
+            );
+        }
+    }
+    for s in &status.skills {
+        let mut line = format!(
+            "{}: effective {} (lock {})",
+            style::bold(&s.name),
+            s.effective_version,
+            s.lock_version
+        );
+        if s.from_override {
+            line.push(' ');
+            line.push_str(&style::magenta(format!("{} override", style::icon::OVERRIDE)));
+        }
+        if s.deprecated {
+            line.push(' ');
+            line.push_str(&style::warn(format!(
+                "{} DEPRECATED{}",
+                style::icon::WARN,
+                s.successor
+                    .as_ref()
+                    .map(|x| style::dim(format!(" → {x}")))
+                    .unwrap_or_default()
+            )));
+        }
+        println!("{line}");
+    }
+}
+
 fn print_sync(report: &skills_sync::SyncReport) {
     for p in &report.placements {
-        let kind = match p.kind {
-            skills_sync::PlacementKind::Symlink => "symlink",
-            skills_sync::PlacementKind::Copy => "copy",
+        let (icon, kind) = match p.kind {
+            skills_sync::PlacementKind::Symlink => (style::icon::LINK, "symlink"),
+            skills_sync::PlacementKind::Copy => (style::icon::COPY, "copy"),
         };
-        println!("{} -> {} ({kind}, {})", p.skill, p.path.display(), p.harness);
+        let kind_s = match p.kind {
+            skills_sync::PlacementKind::Symlink => style::success(kind),
+            skills_sync::PlacementKind::Copy => style::warn(kind),
+        };
+        println!(
+            "{} {} {} {} ({}, {})",
+            icon,
+            style::bold(&p.skill),
+            style::dim("->"),
+            style::dim(p.path.display().to_string()),
+            kind_s,
+            style::accent(&p.harness)
+        );
     }
     for w in &report.warnings {
-        eprintln!("warning: {w}");
+        eprintln!(
+            "{} {}",
+            style::warn(style::icon::WARN),
+            style::warn(format!("warning: {w}"))
+        );
     }
 }
 
@@ -209,7 +305,6 @@ fn init_personal(
     harnesses: &[String],
     scope: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // validate
     let _scope = match scope {
         "user" => PlacementScope::User,
         "project" => PlacementScope::Project,

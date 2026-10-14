@@ -2,6 +2,8 @@
 
 Sync Agent Skills from this library into Claude Code, Codex, Cursor, and Pi.
 
+Demo (CLI + TUI): see the GIF in the [repo README](../README.md#demo). Regenerate with `../scripts/record-demo.sh`.
+
 ## Quick start
 
 ```bash

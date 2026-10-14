@@ -2,6 +2,12 @@
 
 Cross-harness Agent Skills for Claude Code, Codex, Cursor, and Pi.
 
+## Demo
+
+![skills-sync CLI and TUI](docs/demo/skills-sync.gif)
+
+Regenerate with `./scripts/record-demo.sh` (requires [VHS](https://github.com/charmbracelet/vhs)).
+
 ## Catalog
 
 See [docs/catalog/index.md](docs/catalog/index.md) for Skills and Versions on `main`.  

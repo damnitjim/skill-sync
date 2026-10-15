@@ -40,6 +40,12 @@ enum Commands {
         #[arg(long)]
         library: Option<PathBuf>,
     },
+    /// Validate Skill frontmatter, Migration Docs, deps, and lock completeness
+    ValidateSkills {
+        /// Library root containing skills/ and skills.lock (defaults to XDG cache clone)
+        #[arg(long)]
+        library: Option<PathBuf>,
+    },
     /// Interactive TUI
     Tui,
     /// First-run personal setup
@@ -74,11 +80,13 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!(
-                "{} {}",
-                style::error(style::icon::ERR),
-                style::error(format!("error: {e}"))
-            );
+            for line in e.to_string().lines() {
+                eprintln!(
+                    "{} {}",
+                    style::error(style::icon::ERR),
+                    style::error(format!("error: {line}"))
+                );
+            }
             ExitCode::FAILURE
         }
     }
@@ -171,6 +179,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "{} {}",
                 style::success(style::icon::LOCK),
                 style::success(format!("Lock File pins OK ({})", lib.display()))
+            );
+        }
+        Commands::ValidateSkills { library } => {
+            let lib = library.unwrap_or_else(|| app.paths().library_clone.clone());
+            skills_sync::validate_skills(&lib)?;
+            println!(
+                "{} {}",
+                style::success(style::icon::CHECK),
+                style::success(format!("Skills OK ({})", lib.display()))
             );
         }
         Commands::Status => {

@@ -104,11 +104,25 @@ When changing an existing Skill:
 - [ ] Update [`skills.lock`](skills.lock) to the new Version **or** deliberately leave it lagging (call that out in the PR).
 - [ ] Regenerate the catalog:  
   `cd skills-sync && cargo run -- catalog --out ../docs/catalog --library ..`
+- [ ] Run `skills-sync validate-skills --library .` (frontmatter, name/folder, semver, deps, Migration Docs, lock completeness).
 - [ ] Run `skills-sync validate-lock --library .` from the repo root (or via a built binary). Pending tags are OK if HEAD frontmatter matches the lock pin.
 - [ ] Smoke-test: `skills-sync sync` (or `adopt`) in a disposable `HOME` / XDG fixture if you want isolation.
 - [ ] PR description mentions Version bump and whether the Lock File moved.
 
 When adding a **new** Skill: same list, plus add a new lock pin and ensure the Skill is discoverable from the catalog.
+
+## Validation
+
+`skills-sync validate-skills --library .` hard-fails when any Skill folder violates:
+
+1. Required frontmatter: `name`, `description`, `version`
+2. `name` equals the folder name under `skills/`
+3. `version` is valid semver
+4. `description` is non-empty (after trim)
+5. Major ≥ 2 ⇒ Migration Docs (`## Migration` in `SKILL.md` or `MIGRATION.md`)
+6. Each `dependencies` entry names an existing `skills/<dep>/` directory
+7. Every Skill folder is pinned in `skills.lock`, and every lock pin names an existing Skill with parseable `SKILL.md`
+8. No orphan directories under `skills/` (must contain `SKILL.md`)
 
 ## New Skill walkthrough
 
@@ -163,6 +177,7 @@ skills-sync status
 skills-sync sync
 skills-sync adopt
 skills-sync list
+skills-sync validate-skills --library .
 skills-sync validate-lock --library .
 skills-sync catalog --out docs/catalog --library .
 skills-sync tui

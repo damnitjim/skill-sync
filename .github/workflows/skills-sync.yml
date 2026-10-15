@@ -49,6 +49,8 @@ jobs:
         working-directory: skills-sync
       - name: Validate Lock File pins
         run: ./skills-sync/target/release/skills-sync validate-lock --library .
+      - name: Validate Skills frontmatter
+        run: ./skills-sync/target/release/skills-sync validate-skills --library .
 
   release-tags:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

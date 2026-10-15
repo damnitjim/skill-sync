@@ -9,8 +9,10 @@ mod place;
 pub mod release;
 mod skill_meta;
 mod sync_ops;
+mod validate;
 
 pub use error::Error;
+pub use validate::validate_skills;
 pub use sync_ops::{
     AdoptReport, Harness, ListedPlacement, ListedSkill, MigrationNotice, OverridePin, PlacementKind,
     PlacementRecord, PlacementScope, SkillStatus, StatusReport, SyncPaths, SyncReport, WantedSkill,

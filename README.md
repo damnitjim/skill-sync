@@ -37,6 +37,7 @@ skills-sync list            # Installed Skills and Harness paths
 skills-sync adopt           # Align to Lock File (skips Overrides; surfaces Migrations)
 skills-sync remove jira     # Unlink placements, bins, and personal selection
 skills-sync validate-lock   # CI-friendly Lock File ↔ tag check
+skills-sync validate-skills # CI-friendly Skill frontmatter / lock completeness
 skills-sync tui             # Interactive UI
 ```
 

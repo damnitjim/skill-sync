@@ -41,12 +41,13 @@ Sync writes a **canonical** skill tree under `.agents/skills/<name>/` (user: `~/
 - `skills-sync remove <skill>` — unlink placements, bins, and personal selection
 - `skills-sync override <skill> <version>` / `clear-override <skill>`
 - `skills-sync validate-lock [--library <path>]` — Lock File pins vs tags (or HEAD frontmatter)
+- `skills-sync validate-skills [--library <path>]` — Skill frontmatter, Migration Docs, deps, lock completeness
 - `skills-sync catalog --out docs/catalog`
 - `skills-release --parent <sha> --create` — CI Release tagging helper
 
 ## CI
 
-- `.github/workflows/skills-sync.yml` — tests (≥85% line coverage), `validate-lock`, Release tags on `main`
+- `.github/workflows/skills-sync.yml` — tests (≥85% line coverage), `validate-lock`, `validate-skills`, Release tags on `main`
 - `.github/workflows/skills-sync-binaries.yml` — publish `skills-sync-<os>-<arch>` on `skills-sync-v*` tags
 
 ## Development
